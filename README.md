@@ -1,63 +1,47 @@
-# Tra đơn nhanh Sapo — bản MVP
+# Tra cứu nhanh Sapo — Cloudflare Workers
 
-Web app tối ưu cho điện thoại: nhập 4 số cuối, liệt kê các đơn khớp theo mã đơn hoặc mã vận đơn, ưu tiên đơn mới nhất; hiện sản phẩm, số lượng và hãng vận chuyển.
+Bản triển khai dùng Cloudflare Workers + Static Assets; không chạy Express/`server.js`.
 
-## Quan trọng trước khi dùng
+## Cấu hình quan trọng
 
-- Đây là **bộ mã nguồn triển khai**, chưa phải một website đã được public trên Internet.
-- Extension cũ lưu thông tin xác thực trong `chrome.storage.local` dưới khóa `sapoAuth`; web app không tự đọc được dữ liệu này.
-- API `/v2/orders` và các trường được quan sát trong extension có thể là API nội bộ Marketplace, không được đảm bảo ổn định như API công khai. Hãy kiểm tra quyền truy cập và điều khoản Sapo trước khi triển khai.
-- Không gửi token hoặc file `.env` qua chat, không nhúng token vào `public/app.js`, không commit `.env` lên Git.
-- Để dùng trên điện thoại từ ngoài mạng nội bộ, cần triển khai lên máy chủ có HTTPS. Chỉ dùng `(đã bỏ đăng nhập)` riêng cho ứng dụng và giới hạn người được phép truy cập.
+### Biến thường (đã khai báo trong `wrangler.jsonc`)
+- `SAPO_ORIGIN`
+- `SAPO_MARKET_ACCOUNT_ID`
+- `SAPO_CHANNEL_TYPE`
+- `SAPO_CONNECTION_IDS`
+- `SAPO_SORT_BY`
+- `SAPO_ORDER_BY`
+- `SAPO_CHANNEL_ORDER_STATUS`
+- `MAX_PAGES`
+- `CACHE_SECONDS`
 
-## Chạy thử trên máy chủ/máy tính
+Chỉ chỉnh các giá trị thường trong `wrangler.jsonc` khi cần.
 
-Yêu cầu Node.js 20 trở lên.
+### Secret (bắt buộc cấu hình riêng trên Cloudflare)
+- `SAPO_AUTHORIZATION`
+- `SAPO_MARKET_TOKEN`
 
-1. Giải nén thư mục.
-2. Sao chép `.env.example` thành `.env`.
-3. Điền `(đã bỏ đăng nhập)` và các giá trị xác thực Sapo vào `.env` trên máy chủ.
-4. Cài và chạy:
+Trong Cloudflare Dashboard → Workers & Pages → `tracuunhanh-worker` → Settings → Variables and Secrets, tạo hai mục ở loại **Secret**, trong đúng Worker và môi trường **Production**. Không tạo chúng là Text/Variable, không ghi chúng vào GitHub, và không dán token vào mã nguồn. Có thể cần redeploy sau khi cập nhật Secrets.
 
-   ```bash
-   npm install
-   npm start
-   ```
+Nếu chưa có token còn hạn, lấy thông tin xác thực mới từ quy trình Sapo đang hoạt động. Không tái sử dụng token đã công khai trong log.
 
-5. Mở `http://localhost:3000`.
+## Deploy qua GitHub/Cloudflare Workers Builds
+- Build command: để trống nếu hệ thống cho phép.
+- Deploy command: `npx wrangler deploy`.
+- Giữ repository này độc lập với repository đang dùng cho Render. Không xóa Render cho tới khi bản Workers được xác nhận hoạt động.
 
-Khi `NODE_ENV=production`, cookie đăng nhập có cờ `Secure`, vì vậy website phải chạy qua HTTPS.
+File `wrangler.jsonc` đã khai báo các `vars` không bí mật để mỗi lần deploy không loại bỏ chúng khỏi cấu hình từ Dashboard. Hai Secret được khai báo là bắt buộc để Wrangler báo lỗi ngay nếu thiếu; giá trị Secret không được ghi trong file này.
 
-## Lấy thông tin xác thực
+## Kiểm tra sau deploy
+Mở `https://<worker-domain>/api/health/config`. Kết quả chỉ báo `true/false`, không tiết lộ giá trị Secret. Hai trường `hasAnyCredential` và `authorizationConfigured`/`marketTokenConfigured` cho biết Worker có nhận được Secret hay chưa.
 
-Từ extension đã có quyền truy cập, kiểm tra giá trị `sapoAuth` trong bộ nhớ extension và ánh xạ các trường:
-- `origin` → `SAPO_ORIGIN`
-- `authorization` → `SAPO_AUTHORIZATION`
-- `xMarketAccountId` → `SAPO_MARKET_ACCOUNT_ID`
-- `xMarketToken` → `SAPO_MARKET_TOKEN`
-- `channelType`, `connectionIds`, `sortBy`, `orderBy`, `channelOrderStatus` → các biến cùng tên trong `.env` nếu có.
+Tiếp theo kiểm tra `/api/search?q=<mã-đơn-thật>`. Lỗi `Máy chủ chưa cấu hình...` là Secret chưa được binding vào Worker; lỗi `401/403` là Sapo từ chối token (token sai/hết hạn/quyền không đủ); `count: 0` nghĩa là API đã chạy nhưng đơn không xuất hiện trong các trang/trạng thái đã quét.
 
-Không đưa thông tin này vào frontend hoặc ảnh chụp màn hình. Nếu token có thời hạn, cần quy trình cập nhật/đổi token; không nên dựa vào token cũ mãi mãi.
+## Tính năng
+- Tra cứu một phần mã đơn hoặc mã vận đơn.
+- Tra cứu một đoạn địa chỉ giao hàng nếu đoạn đó có trong dữ liệu API Sapo trả về.
+- Hiển thị SKU, số lượng, tên sản phẩm, đơn vị vận chuyển, ngày tạo, mã vận đơn và địa chỉ có sẵn.
+- Phân trang theo `MAX_PAGES`; giao diện báo khi dữ liệu có khả năng bị giới hạn.
+- Endpoint chẩn đoán `/api/health/config` không bao giờ trả nội dung Secret.
 
-## Giới hạn hiện tại cần kiểm tra với dữ liệu thật
-
-1. Máy chủ dò tối đa `MAX_PAGES` trang (mặc định 10 × 100 đơn) để giữ tốc độ. Nếu có nhiều đơn hơn, có thể tăng `MAX_PAGES`.
-2. Mã đang dò các trường mã đơn phổ biến: `channel_order_number`, `sapo_order_code`, `order_code`, `code`, `order_number` và `tracking_code`.
-3. Tên hãng vận chuyển có thể khác nhau theo cấu trúc response của tài khoản Sapo. Nếu chưa được trả về trong trường đã hỗ trợ, giao diện sẽ hiện “Chưa xác định”; cần chỉnh bộ ánh xạ sau khi kiểm tra response thật.
-4. Tên sản phẩm và số lượng được đọc từ `items`, `line_items`, `order_items`, `products` hoặc `details`; cấu trúc response thực tế có thể cần bổ sung.
-5. Thứ tự “mới nhất” được sắp theo thời gian tạo đơn trả về. Nên xác nhận tên trường thời gian của API thật.
-
-## Bảo mật
-
-- Dùng HTTPS khi public.
-- Dùng mật khẩu ứng dụng riêng, dài và khó đoán.
-- Hạn chế truy cập máy chủ; không public endpoint cho người lạ.
-- Token chỉ nằm trong biến môi trường phía máy chủ; không gửi token về trình duyệt.
-- Phiên đăng nhập hết hạn sau 12 giờ; đăng xuất sẽ thu hồi phiên.
-- Cache kết quả mặc định 20 giây, không lưu lâu dài danh sách đơn.
-- Trước khi sử dụng thực tế, nên bổ sung kiểm thử với response đã ẩn thông tin cá nhân và cơ chế cập nhật token phù hợp.
-
-
-## Lưu ý về truy cập nội bộ
-
-Phiên bản này đã bỏ màn hình đăng nhập. Nếu triển khai dưới dạng Render Web Service thông thường, đường dẫn có thể truy cập công khai; chỉ chia sẻ cho nhân viên và không đăng token Sapo vào mã nguồn/GitHub. Token Sapo vẫn chỉ được đọc ở máy chủ qua biến môi trường. Nếu cần giới hạn thật sự theo nhân viên, hãy dùng VPN hoặc lớp kiểm soát truy cập ở phía máy chủ.
+**Giới hạn:** Bản này không thể khôi phục phần địa chỉ mà chính API Sapo đã che/mask hoặc không trả về. Nó chỉ tìm trong dữ liệu máy chủ nhận được.

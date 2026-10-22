@@ -1,8 +1,14 @@
 {
-  "name": "sapo-mobile-order-lookup-workers",
-  "version": "1.0.0",
+  "name": "tracuunhanh-cloudflare-workers",
+  "version": "1.1.0",
   "private": true,
-  "description": "Sapo mobile order lookup migrated to Cloudflare Workers",
-  "scripts": { "deploy": "wrangler deploy", "dev": "wrangler dev" },
-  "devDependencies": { "wrangler": "^4.0.0" }
+  "description": "Tra cứu đơn Sapo trên Cloudflare Workers",
+  "scripts": {
+    "deploy": "wrangler deploy",
+    "dev": "wrangler dev",
+    "check": "wrangler deploy --dry-run"
+  },
+  "devDependencies": {
+    "wrangler": "^4.0.0"
+  }
 }

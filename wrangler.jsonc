@@ -1,4 +1,3 @@
-
 {
   "$schema": "node_modules/wrangler/config-schema.json",
   "name": "tracuunhanh-worker",
@@ -14,10 +13,16 @@
     "SAPO_MARKET_ACCOUNT_ID": "MTA4MDkzNQ==",
     "SAPO_CHANNEL_TYPE": "",
     "SAPO_CONNECTION_IDS": "111925,132739,142785,142786,143994,149343,149356,149584,149742",
-    "SAPO_CHANNEL_ORDER_STATUS": "PROCESSED,READY_TO_SHIP,RETRY_SHIP",
     "SAPO_SORT_BY": "ISSUED_AT",
     "SAPO_ORDER_BY": "desc",
+    "SAPO_CHANNEL_ORDER_STATUS": "PROCESSED,READY_TO_SHIP,RETRY_SHIP",
     "MAX_PAGES": "10",
-    "CACHE_SECONDS": "20"
+    "CACHE_SECONDS": "10"
+  },
+  "secrets": {
+    "required": [
+      "SAPO_AUTHORIZATION",
+      "SAPO_MARKET_TOKEN"
+    ]
   }
 }
