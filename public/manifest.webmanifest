@@ -1,0 +1,9 @@
+{
+  "name": "Tra đơn nhanh Sapo",
+  "short_name": "Tra đơn Sapo",
+  "start_url": "/",
+  "display": "standalone",
+  "background_color": "#f3f6f3",
+  "theme_color": "#14532d",
+  "description": "Tra cứu đơn hàng Sapo bằng 4 số cuối"
+}

@@ -1,0 +1,56 @@
+<!doctype html>
+<html lang="vi">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <meta name="theme-color" content="#14532d">
+  <meta name="description" content="Tra cứu đơn hàng Sapo bằng mã đơn">
+  <title>Tra đơn nhanh · Sapo</title>
+  <link rel="manifest" href="/manifest.webmanifest">
+  <link rel="stylesheet" href="/styles.css">
+</head>
+<body>
+  <main class="app-shell">
+    <header class="topbar">
+      <div class="brand-icon" aria-hidden="true">⚡</div>
+      <div class="brand-copy">
+        <h1>Tra cứu nhanh</h1>
+        <p>Sapo · Đơn hỏa tốc</p>
+      </div>
+    </header>
+
+    <section id="search-panel" class="hidden">
+      <section class="search-card">
+        <div class="eyebrow">TÌM ĐƠN HÀNG</div>
+        <h2>Nhập mã đơn hoặc mã vận đơn</h2>
+        <p class="muted"></p>
+        <form id="search-form" class="search-form">
+          <div class="input-wrap">
+            <span aria-hidden="true">⌕</span>
+            <input id="last4" type="search" inputmode="text" maxlength="100" placeholder="Mã đơn hàng..." autocomplete="off" aria-label="Mã đơn hoặc mã vận đơn" required>
+            <button id="clear" type="button" class="clear-button" aria-label="Xóa">×</button>
+          </div>
+          <button id="search-button" class="primary search-button" type="submit">Tra cứu</button>
+        </form>
+       
+      </section>
+
+      <section id="results-section" class="results-section hidden" aria-live="polite">
+        <div class="results-heading">
+          <div>
+            <h2>Kết quả tra cứu</h2>
+            <p id="result-subtitle" class="muted"></p>
+          </div>
+          <span id="result-count" class="count-pill">0 đơn</span>
+        </div>
+        <div id="results"></div>
+        <p id="partial-warning" class="warning hidden">Đã giới hạn số trang kiểm tra.</p>
+      </section>
+    </section>
+
+    <div id="status" class="status" role="status"></div>
+    <footer></footer>
+  </main>
+  <script src="/app.js" defer></script>
+</body>
+</html>
