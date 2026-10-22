@@ -1,3 +1,4 @@
+
 {
   "$schema": "node_modules/wrangler/config-schema.json",
   "name": "tracuunhanh-worker",
@@ -7,5 +8,16 @@
     "directory": "./public",
     "binding": "ASSETS",
     "not_found_handling": "single-page-application"
+  },
+  "vars": {
+    "SAPO_ORIGIN": "https://market-place.sapoapps.vn",
+    "SAPO_MARKET_ACCOUNT_ID": "MTA4MDkzNQ==",
+    "SAPO_CHANNEL_TYPE": "",
+    "SAPO_CONNECTION_IDS": "111925,132739,142785,142786,143994,149343,149356,149584,149742",
+    "SAPO_CHANNEL_ORDER_STATUS": "PROCESSED,READY_TO_SHIP,RETRY_SHIP",
+    "SAPO_SORT_BY": "ISSUED_AT",
+    "SAPO_ORDER_BY": "desc",
+    "MAX_PAGES": "10",
+    "CACHE_SECONDS": "20"
   }
 }
