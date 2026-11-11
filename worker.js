@@ -1,7 +1,9 @@
 const cache = new Map();
 const MAX_PAGES_DEFAULT = 10;
 const CACHE_SECONDS_DEFAULT = 10;
-const WORKER_VERSION = '1.1.0';
+const WORKER_VERSION = '1.2.2';
+const AUTH_KV_KEY = 'sapo-auth-current';
+const AUTH_KV_TTL_SECONDS = 60 * 60 * 24 * 60;
 
 function json(data, status = 200) {
   return new Response(JSON.stringify(data), {
@@ -17,24 +19,87 @@ function json(data, status = 200) {
   });
 }
 
-function getSapoConfig(env) {
+function jwtExpiryMs(token) {
+  const value = String(token || '').replace(/^Bearer\s+/i, '').trim();
+  const parts = value.split('.');
+  if (parts.length !== 3) return null;
+  try {
+    const payloadText = parts[1].replace(/-/g, '+').replace(/_/g, '/');
+    const payload = JSON.parse(atob(payloadText.padEnd(Math.ceil(payloadText.length / 4) * 4, '=')));
+    const exp = Number(payload.exp);
+    return Number.isFinite(exp) ? exp * 1000 : null;
+  } catch (_) {
+    return null;
+  }
+}
+
+function usableToken(token) {
+  const value = String(token || '').trim();
+  if (!value) return false;
+  const expiry = jwtExpiryMs(value);
+  return expiry === null || expiry > Date.now() + 30000;
+}
+
+async function readSyncedAuth(env) {
+  if (!env.SAPO_AUTH_KV) return null;
+  try {
+    return await env.SAPO_AUTH_KV.get(AUTH_KV_KEY, 'json');
+  } catch (_) {
+    return null;
+  }
+}
+
+async function getSapoConfig(env) {
   const origin = String(env.SAPO_ORIGIN || 'https://market-place.sapoapps.vn').trim();
   let parsed;
   try { parsed = new URL(origin); } catch { throw new Error('SAPO_ORIGIN không hợp lệ.'); }
-  if (parsed.protocol !== 'https:') throw new Error('SAPO_ORIGIN phải dùng HTTPS.');
+  if (parsed.protocol !== 'https:' || parsed.hostname !== 'market-place.sapoapps.vn') {
+    throw new Error('SAPO_ORIGIN phải dùng HTTPS và trỏ tới market-place.sapoapps.vn.');
+  }
 
-  const authorization = String(env.SAPO_AUTHORIZATION || '').trim();
-  const marketToken = String(env.SAPO_MARKET_TOKEN || '').trim();
-  const accountId = String(env.SAPO_MARKET_ACCOUNT_ID || '').trim();
+  const synced = await readSyncedAuth(env);
+  const syncedAuthorization = usableToken(synced?.authorization) ? String(synced.authorization).trim() : '';
+  const syncedMarketToken = usableToken(synced?.xMarketToken) ? String(synced.xMarketToken).trim() : '';
+  const hasUsableSynced = Boolean(syncedAuthorization || syncedMarketToken);
+
+  const envAuthorization = usableToken(env.SAPO_AUTHORIZATION) ? String(env.SAPO_AUTHORIZATION).trim() : '';
+  const envMarketToken = usableToken(env.SAPO_MARKET_TOKEN) ? String(env.SAPO_MARKET_TOKEN).trim() : '';
+  // Merge từng header độc lập: KV có thể cập nhật X-Market-Token trước,
+  // trong khi Authorization vẫn đang hợp lệ từ cấu hình Secret (hoặc ngược lại).
+  const authorization = syncedAuthorization || envAuthorization;
+  const marketToken = syncedMarketToken || envMarketToken;
+  const accountId = String(synced?.xMarketAccountId || env.SAPO_MARKET_ACCOUNT_ID || '').trim();
+
   const headers = { Accept: 'application/json' };
   if (authorization) headers.Authorization = authorization;
   if (marketToken) headers['X-Market-Token'] = marketToken;
   if (accountId) headers['X-Market-Account-Id'] = accountId;
 
   if (!authorization && !marketToken) {
-    throw new Error('Worker chưa nhận được Secret SAPO_AUTHORIZATION hoặc SAPO_MARKET_TOKEN. Hãy tạo chúng dưới dạng Secret trong đúng Worker tracuunhanh-worker, môi trường Production; không tạo dạng Text/Variable.');
+    const hasAnySaved = Boolean(
+      String(synced?.authorization || '').trim() ||
+      String(synced?.xMarketToken || '').trim() ||
+      String(env.SAPO_AUTHORIZATION || '').trim() ||
+      String(env.SAPO_MARKET_TOKEN || '').trim()
+    );
+    if (hasAnySaved) {
+      throw new Error('Token Sapo đã hết hạn hoặc sắp hết hạn. Mở Sapo trên Edge, tải lại danh sách đơn để extension đồng bộ token mới, rồi thử lại.');
+    }
+    throw new Error('Chưa có token Sapo. Mở Sapo trên Edge, tải danh sách đơn để extension bắt token và đồng bộ lên Worker.');
   }
-  return { origin: parsed.origin, headers };
+  return {
+    origin: parsed.origin,
+    headers,
+    source: hasUsableSynced ? 'extension-kv' : 'cloudflare-secret',
+    syncedAt: hasUsableSynced ? Number(synced?.capturedAt || 0) : 0,
+    query: {
+      channelType: String(synced?.channelType || env.SAPO_CHANNEL_TYPE || ''),
+      connectionIds: String(synced?.connectionIds || env.SAPO_CONNECTION_IDS || ''),
+      sortBy: String(synced?.sortBy || env.SAPO_SORT_BY || 'ISSUED_AT'),
+      orderBy: String(synced?.orderBy || env.SAPO_ORDER_BY || 'desc'),
+      channelOrderStatus: String(env.SAPO_CHANNEL_ORDER_STATUS || 'READY_TO_SHIP,RETRY_SHIP')
+    }
+  };
 }
 
 function normalizeSearch(value) {
@@ -143,11 +208,11 @@ function mapOrder(o) {
 async function fetchOrdersPage(config, env, page) {
   const url = new URL('/v2/orders', config.origin);
   const params = {
-    channelType: env.SAPO_CHANNEL_TYPE,
-    connectionIds: env.SAPO_CONNECTION_IDS,
-    sortBy: env.SAPO_SORT_BY || 'ISSUED_AT',
-    orderBy: env.SAPO_ORDER_BY || 'desc',
-    channelOrderStatus: env.SAPO_CHANNEL_ORDER_STATUS || 'READY_TO_SHIP,RETRY_SHIP'
+    channelType: config.query?.channelType || env.SAPO_CHANNEL_TYPE,
+    connectionIds: config.query?.connectionIds || env.SAPO_CONNECTION_IDS,
+    sortBy: config.query?.sortBy || env.SAPO_SORT_BY || 'ISSUED_AT',
+    orderBy: config.query?.orderBy || env.SAPO_ORDER_BY || 'desc',
+    channelOrderStatus: config.query?.channelOrderStatus || env.SAPO_CHANNEL_ORDER_STATUS || 'READY_TO_SHIP,RETRY_SHIP'
   };
   for (const [key, value] of Object.entries(params)) if (value !== undefined && value !== null && String(value).trim() !== '') url.searchParams.set(key, String(value));
   url.searchParams.set('page', String(page));
@@ -161,7 +226,7 @@ async function fetchOrdersPage(config, env, page) {
     throw new Error('Không kết nối được Sapo API. Kiểm tra mạng hoặc cấu hình xác thực.');
   }
   if (!response.ok) {
-    if (response.status === 401 || response.status === 403) throw new Error('Sapo từ chối xác thực (401/403). Hãy cập nhật token Sapo còn hạn trong Secrets của Cloudflare.');
+    if (response.status === 401 || response.status === 403) throw new Error('Sapo từ chối xác thực (401/403). Mở Sapo trên Edge, tải lại danh sách đơn để extension bắt và đồng bộ token mới; nếu phiên đã hết hạn, hãy đăng nhập lại.');
     const detail = response.status === 429 ? 'Sapo giới hạn số yêu cầu (429).' : `Sapo API trả lỗi HTTP ${response.status}.`;
     throw new Error(detail);
   }
@@ -175,17 +240,30 @@ async function fetchOrdersPage(config, env, page) {
   return { orders, total };
 }
 
-function configHealth(env) {
-  const auth = Boolean(String(env.SAPO_AUTHORIZATION || '').trim());
-  const token = Boolean(String(env.SAPO_MARKET_TOKEN || '').trim());
+async function configHealth(env) {
+  const synced = await readSyncedAuth(env);
+  const config = await getSapoConfig(env).catch(() => null);
+  const hasStaticAuthorization = Boolean(String(env.SAPO_AUTHORIZATION || '').trim());
+  const hasStaticMarketToken = Boolean(String(env.SAPO_MARKET_TOKEN || '').trim());
+  const hasSyncedAuthorization = Boolean(String(synced?.authorization || '').trim());
+  const hasSyncedMarketToken = Boolean(String(synced?.xMarketToken || '').trim());
+  const capturedAt = Number(synced?.capturedAt || 0);
   return {
     ok: true,
     workerVersion: WORKER_VERSION,
     auth: {
-      authorizationConfigured: auth,
-      marketTokenConfigured: token,
-      hasAnyCredential: auth || token,
-      accountIdConfigured: Boolean(String(env.SAPO_MARKET_ACCOUNT_ID || '').trim())
+      authorizationConfigured: Boolean(config?.headers?.Authorization),
+      marketTokenConfigured: Boolean(config?.headers?.['X-Market-Token']),
+      hasAnyCredential: Boolean(config),
+      accountIdConfigured: Boolean(config?.headers?.['X-Market-Account-Id'] || env.SAPO_MARKET_ACCOUNT_ID),
+      source: config?.source || (hasSyncedAuthorization || hasSyncedMarketToken ? 'expired-or-invalid' : 'missing'),
+      syncedCredentialAvailable: hasSyncedAuthorization || hasSyncedMarketToken,
+      capturedAt: capturedAt ? new Date(capturedAt).toISOString() : null,
+      staticSecretConfigured: hasStaticAuthorization || hasStaticMarketToken
+    },
+    sync: {
+      endpointReady: Boolean(String(env.SAPO_SYNC_SECRET || '').trim()),
+      kvBindingReady: Boolean(env.SAPO_AUTH_KV)
     },
     query: {
       originConfigured: Boolean(String(env.SAPO_ORIGIN || '').trim()),
@@ -193,8 +271,74 @@ function configHealth(env) {
       statusFilterConfigured: Boolean(String(env.SAPO_CHANNEL_ORDER_STATUS || '').trim()),
       maxPages: Math.max(1, Math.min(60, Number(env.MAX_PAGES || MAX_PAGES_DEFAULT)))
     },
-    note: 'Chỉ hiển thị trạng thái cấu hình, không trả về giá trị Secret.'
+    note: 'Chỉ hiển thị trạng thái, không trả về giá trị token hoặc khóa đồng bộ.'
   };
+}
+
+function constantTimeEqual(a, b) {
+  const left = String(a || '');
+  const right = String(b || '');
+  if (!left || !right || left.length !== right.length) return false;
+  let mismatch = 0;
+  for (let i = 0; i < left.length; i++) mismatch |= left.charCodeAt(i) ^ right.charCodeAt(i);
+  return mismatch === 0;
+}
+
+async function syncSapoAuth(request, env) {
+  if (request.method !== 'POST') return json({ ok: false, error: 'Method not allowed.' }, 405);
+  if (!env.SAPO_AUTH_KV) {
+    return json({ ok: false, error: 'Worker chưa được gắn KV namespace SAPO_AUTH_KV. Hãy thêm KV binding rồi deploy lại.' }, 503);
+  }
+  const expectedKey = String(env.SAPO_SYNC_SECRET || '');
+  const suppliedKey = String(request.headers.get('X-Sapo-Sync-Key') || '');
+  if (!expectedKey) return json({ ok: false, error: 'Worker chưa cấu hình Secret SAPO_SYNC_SECRET.' }, 503);
+  if (!constantTimeEqual(suppliedKey, expectedKey)) return json({ ok: false, error: 'Khóa đồng bộ không đúng.' }, 401);
+
+  const length = Number(request.headers.get('content-length') || 0);
+  if (length > 20000) return json({ ok: false, error: 'Payload quá lớn.' }, 413);
+  let payload;
+  try { payload = await request.json(); }
+  catch (_) { return json({ ok: false, error: 'JSON không hợp lệ.' }, 400); }
+
+  const authorization = String(payload?.authorization || '').trim();
+  const xMarketToken = String(payload?.xMarketToken || '').trim();
+  const xMarketAccountId = String(payload?.xMarketAccountId || '').trim();
+  if (!authorization && !xMarketToken) return json({ ok: false, error: 'Payload không có thông tin xác thực Sapo.' }, 400);
+  if (authorization.length > 8192 || xMarketToken.length > 8192 || xMarketAccountId.length > 512) {
+    return json({ ok: false, error: 'Trường xác thực vượt quá giới hạn cho phép.' }, 400);
+  }
+  const usableAuthorization = usableToken(authorization) ? authorization : '';
+  const usableMarketToken = usableToken(xMarketToken) ? xMarketToken : '';
+  if (!usableAuthorization && !usableMarketToken) {
+    return json({ ok: false, error: 'Token đã hết hạn hoặc sắp hết hạn; hãy tải lại danh sách đơn Sapo để bắt token mới.' }, 400);
+  }
+
+  const record = {
+    authorization: usableAuthorization,
+    xMarketToken: usableMarketToken,
+    xMarketAccountId,
+    origin: 'https://market-place.sapoapps.vn',
+    capturedAt: Number(payload?.capturedAt) > 0 ? Number(payload.capturedAt) : Date.now(),
+    savedAt: Date.now(),
+    source: 'edge-extension',
+    connectionIds: String(payload?.connectionIds || '').slice(0, 4000),
+    channelType: String(payload?.channelType || '').slice(0, 200),
+    sortBy: String(payload?.sortBy || '').slice(0, 100),
+    orderBy: String(payload?.orderBy || '').slice(0, 100)
+  };
+  try {
+    await env.SAPO_AUTH_KV.put(AUTH_KV_KEY, JSON.stringify(record), { expirationTtl: AUTH_KV_TTL_SECONDS });
+    cache.clear();
+  } catch (_) {
+    return json({ ok: false, error: 'Không thể lưu token vào Cloudflare KV. Kiểm tra quyền ghi của binding SAPO_AUTH_KV.' }, 500);
+  }
+  return json({
+    ok: true,
+    message: 'Đã đồng bộ thông tin xác thực và tham số kết nối Sapo.',
+    capturedAt: new Date(record.capturedAt).toISOString(),
+    storedAt: new Date(record.savedAt).toISOString(),
+    recordTtlDays: 60
+  });
 }
 
 async function searchOrders(request, env) {
@@ -203,16 +347,17 @@ async function searchOrders(request, env) {
   const normalizedQuery = normalizeSearch(query);
   if (normalizedQuery.length < 2) return json({ error: 'Nhập ít nhất 2 ký tự của mã đơn, mã vận đơn hoặc địa chỉ giao hàng.' }, 400);
   if (query.length > 100) return json({ error: 'Từ khóa quá dài.' }, 400);
-  if (!String(env.SAPO_AUTHORIZATION || '').trim() && !String(env.SAPO_MARKET_TOKEN || '').trim()) {
-    return json({ error: 'Worker chưa nhận được Secret SAPO_AUTHORIZATION hoặc SAPO_MARKET_TOKEN. Hãy tạo chúng dưới dạng Secret trong đúng Worker tracuunhanh-worker, môi trường Production; không tạo dạng Text/Variable.', hint: '/api/health/config' }, 503);
-  }
   const cacheKey = normalizedQuery;
   const now = Date.now();
   const cached = cache.get(cacheKey);
   if (cached && cached.expires > now) return json({ ...cached.data, cached: true });
 
   try {
-    const config = getSapoConfig(env);
+    let config;
+    try { config = await getSapoConfig(env); }
+    catch (authError) {
+      return json({ error: authError?.message || 'Chưa có token Sapo hợp lệ.', hint: '/api/health/config' }, 503);
+    }
     const maxPages = Math.max(1, Math.min(60, Number(env.MAX_PAGES || MAX_PAGES_DEFAULT)));
     const first = await fetchOrdersPage(config, env, 1);
     const all = [...first.orders];
@@ -260,7 +405,27 @@ async function searchOrders(request, env) {
 export default {
   async fetch(request, env) {
     const url = new URL(request.url);
-    if (request.method === 'GET' && url.pathname === '/api/health/config') return json(configHealth(env));
+    if (request.method === 'GET' && url.pathname === '/api/health/config') return json(await configHealth(env));
+    if (url.pathname === '/api/sync-sapo-auth') {
+      if (request.method === 'OPTIONS') {
+        return new Response(null, { status: 204, headers: {
+          'access-control-allow-origin': request.headers.get('Origin') || '*',
+          'access-control-allow-methods': 'POST, OPTIONS',
+          'access-control-allow-headers': 'Content-Type, X-Sapo-Sync-Key',
+          'access-control-max-age': '600',
+          'cache-control': 'no-store'
+        }});
+      }
+      const response = await syncSapoAuth(request, env);
+      const origin = request.headers.get('Origin') || '';
+      if (origin.startsWith('chrome-extension://')) {
+        const headers = new Headers(response.headers);
+        headers.set('access-control-allow-origin', origin);
+        headers.set('vary', 'Origin');
+        return new Response(response.body, { status: response.status, headers });
+      }
+      return response;
+    }
     if (request.method === 'GET' && url.pathname === '/api/search') return searchOrders(request, env);
     if (url.pathname.startsWith('/api/')) return json({ error: 'Không tìm thấy API.' }, 404);
     return env.ASSETS.fetch(request);
