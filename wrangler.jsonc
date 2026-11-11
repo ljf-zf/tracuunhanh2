@@ -1,6 +1,6 @@
 {
   "$schema": "node_modules/wrangler/config-schema.json",
-  "name": "sku",
+  "name": "tracuunhanh-worker",
   "main": "worker.js",
   "compatibility_date": "2026-10-22",
   "assets": {
@@ -21,8 +21,13 @@
   },
   "secrets": {
     "required": [
-      "SAPO_AUTHORIZATION",
-      "SAPO_MARKET_TOKEN"
+      "SAPO_SYNC_SECRET"
     ]
-  }
+  },
+  "kv_namespaces": [
+    {
+      "binding": "SAPO_AUTH_KV",
+      "id": "2542a2aaf4e54ea889fe3c81bb71b9a3"
+    }
+  ]
 }
