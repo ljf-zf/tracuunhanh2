@@ -21,9 +21,19 @@
   },
   "secrets": {
     "required": [
-      "SAPO_SYNC_SECRET"
+      "SAPO_SYNC_SECRET",
+      "PRINT_AGENT_TOKEN",
+      "PRINT_WEB_PIN"
     ]
   },
+  "durable_objects": {
+    "bindings": [
+      { "name": "PRINT_BROKER", "class_name": "PrintBroker" }
+    ]
+  },
+  "migrations": [
+    { "tag": "v1", "new_sqlite_classes": ["PrintBroker"] }
+  ],
   "kv_namespaces": [
     {
       "binding": "SAPO_AUTH_KV",

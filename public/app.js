@@ -5,6 +5,8 @@ const statusEl = $('status');
 let searchTimer = null;
 let activeController = null;
 let lastQuery = '';
+let printPin = '';
+const currentOrders = new Map();
 
 function setStatus(text = '', kind = '') {
   statusEl.textContent = text;
@@ -24,11 +26,14 @@ function renderOrders(data) {
   $('result-subtitle').textContent = `Từ khóa “${data.query || ''}” · Đã kiểm tra ${data.scanned} đơn`;
   $('partial-warning').classList.toggle('hidden', !data.partial);
   const results = $('results');
+  currentOrders.clear();
   if (!data.orders.length) {
     results.innerHTML = `<div class="empty-state"><div class="empty-icon">⌕</div><strong>Chưa tìm thấy đơn phù hợp</strong><br>Thử mã đơn, mã vận đơn hoặc một đoạn địa chỉ có trong dữ liệu Sapo.</div>`;
     return;
   }
   results.innerHTML = data.orders.map(order => {
+    const key = String(order.id || order.code);
+    currentOrders.set(key, order);
     const carrierUnknown = !order.carrier || order.carrier === 'Chưa xác định';
     const items = order.items && order.items.length
       ? order.items.map(item => `<div class="product-row"><div class="product-main"><div class="sku-line"><span class="product-sku">${item.sku ? escapeHtml(item.sku) : 'Chưa có SKU'}</span><span class="qty">× ${Number(item.quantity) || 0}</span></div><div class="product-name">${escapeHtml(item.name)}${item.variant ? ` · ${escapeHtml(item.variant)}` : ''}</div></div></div>`).join('')
@@ -38,9 +43,56 @@ function renderOrders(data) {
       ${order.trackingCode ? `<div class="tracking-code">Mã vận đơn: ${escapeHtml(order.trackingCode)}</div>` : ''}
       ${order.address ? `<div class="order-address">${escapeHtml(order.address)}</div>` : ''}
       ${items}
+      <div class="order-actions"><button type="button" class="print-button" data-print-order="${escapeHtml(key)}">▣ In bill</button></div>
     </article>`;
   }).join('');
 }
+
+async function updatePrinterStatus() {
+  const indicator = $('printer-status');
+  try {
+    const response = await fetch('/api/print/status', { credentials: 'same-origin', cache: 'no-store' });
+    const data = await response.json().catch(() => ({}));
+    const connected = response.ok && Boolean(data.connected);
+    indicator.className = `printer-status ${connected ? 'online' : 'offline'}`;
+    indicator.innerHTML = `<span class="printer-dot"></span>${connected ? 'Máy tính in đã kết nối' : 'Máy tính in chưa kết nối'}`;
+  } catch (_) {
+    indicator.className = 'printer-status offline';
+    indicator.innerHTML = '<span class="printer-dot"></span>Không kiểm tra được máy in';
+  }
+}
+
+async function printOrder(orderKey, button) {
+  const order = currentOrders.get(String(orderKey));
+  if (!order) { setStatus('Không tìm thấy dữ liệu đơn để in. Hãy tra cứu lại.', 'error'); return; }
+  if (!printPin) {
+    printPin = String(window.prompt('Nhập mã PIN in do quản trị viên cung cấp:') || '').trim();
+    if (!printPin) return;
+  }
+  button.disabled = true;
+  const originalText = button.textContent;
+  button.textContent = 'Đang gửi lệnh…';
+  setStatus(`Đang gửi bill ${order.code} đến máy in…`);
+  try {
+    const response = await fetch('/api/print', {
+      method: 'POST',
+      credentials: 'same-origin',
+      headers: { 'content-type': 'application/json', 'X-Print-Pin': printPin },
+      body: JSON.stringify({ order })
+    });
+    const data = await response.json().catch(() => ({}));
+    if (response.status === 401) printPin = '';
+    if (!response.ok || !data.ok) throw new Error(data.error || data.message || `Không in được (${response.status}).`);
+    setStatus(`Đã gửi lệnh in ${order.code} đến ${data.printerName || 'máy in'}. ${data.message || ''}`, 'success');
+    button.textContent = 'Đã gửi in';
+  } catch (error) {
+    setStatus(error.message, 'error');
+    button.textContent = originalText;
+    button.disabled = false;
+    updatePrinterStatus();
+  }
+}
+
 async function search(query, { force = false } = {}) {
   query = String(query || '').trim();
   if (query.length < 2) { setStatus('Nhập ít nhất 2 ký tự để tra cứu.', 'error'); return; }
@@ -84,4 +136,8 @@ $('clear').addEventListener('click', () => {
   resultsSection.classList.add('hidden');
   setStatus('');
 });
-(function init() { searchPanel.classList.remove('hidden'); setStatus('Sẵn sàng tra cứu đơn hàng.'); })();
+$('results').addEventListener('click', event => {
+  const button = event.target.closest('[data-print-order]');
+  if (button) printOrder(button.dataset.printOrder, button);
+});
+(function init() { searchPanel.classList.remove('hidden'); setStatus('Sẵn sàng tra cứu đơn hàng.'); updatePrinterStatus(); setInterval(updatePrinterStatus, 30000); })();

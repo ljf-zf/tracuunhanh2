@@ -1,7 +1,7 @@
 const cache = new Map();
 const MAX_PAGES_DEFAULT = 10;
 const CACHE_SECONDS_DEFAULT = 10;
-const WORKER_VERSION = '1.2.2';
+const WORKER_VERSION = '1.3.0';
 const AUTH_KV_KEY = 'sapo-auth-current';
 const AUTH_KV_TTL_SECONDS = 60 * 60 * 24 * 60;
 
@@ -153,7 +153,7 @@ function getItems(o) {
     const name = item.item_name || item.product_name || item.name || item.title || item.variation_name || product.name || product.title || product.item_name || 'Sản phẩm chưa có tên';
     const variant = item.variation_name || item.variant_name || item.variant_title || '';
     const qty = Number(item.quantity ?? item.qty ?? item.amount ?? item.ordered_quantity ?? 0);
-    return { name: String(name), variant: variant && String(variant) !== String(name) ? String(variant) : '', quantity: Number.isFinite(qty) ? qty : 0, sku: item.sku || product.sku || '' };
+    return { name: String(name), variant: variant && String(variant) !== String(name) ? String(variant) : '', quantity: Number.isFinite(qty) ? qty : 0, sku: item.sku || product.sku || '', unitPrice: firstNumber(item.unit_price, item.price, item.sale_price, item.price_after_discount), lineTotal: firstNumber(item.line_total, item.total_price, item.final_amount, item.amount) };
   });
 }
 
@@ -189,6 +189,50 @@ function getAddress(order) {
   return parts.slice(0, 12).join(', ');
 }
 
+function firstText(...values) {
+  for (const value of values) {
+    if (typeof value === 'string' || typeof value === 'number') {
+      const text = String(value).trim();
+      if (text) return text;
+    }
+  }
+  return '';
+}
+
+function firstNumber(...values) {
+  for (const value of values) {
+    if (value === undefined || value === null || value === '') continue;
+    const number = Number(value);
+    if (Number.isFinite(number)) return number;
+  }
+  return null;
+}
+
+function getPrintFields(o) {
+  const customer = o.customer || o.buyer || {};
+  const shipping = o.shipping_address || o.delivery_address || o.receiver_address || o.shippingAddress || {};
+  const payment = o.payment_info || o.payment || o.payment_summary || {};
+  const totals = o.price_summary || o.amounts || o.financial || {};
+  const customerName = firstText(
+    o.receiver_name, o.customer_name, o.recipient_name, o.ship_to_name,
+    shipping.receiver_name, shipping.full_name, shipping.name,
+    customer.full_name, customer.name, customer.customer_name
+  );
+  const phone = firstText(
+    o.receiver_phone, o.customer_phone, o.phone_number, o.phone, o.recipient_phone,
+    shipping.phone_number, shipping.phone, shipping.receiver_phone,
+    customer.phone_number, customer.phone, customer.mobile
+  );
+  const totalAmount = firstNumber(o.total_amount, o.total_price, o.grand_total, o.order_total, o.total,
+    totals.total_amount, totals.total_price, totals.grand_total, payment.total_amount);
+  const shippingFee = firstNumber(o.shipping_fee, o.shipping_fee_amount, o.delivery_fee, o.shipping_price,
+    o.total_shipping_fee, totals.shipping_fee, totals.delivery_fee);
+  const discountAmount = firstNumber(o.discount_amount, o.total_discount, o.discount, totals.discount_amount, totals.discount);
+  const codAmount = firstNumber(o.cod_amount, o.amount_to_collect, o.collect_amount, o.cash_on_delivery, payment.cod_amount);
+  const paymentMethod = firstText(o.payment_method_name, o.payment_method, payment.method_name, payment.method, payment.name);
+  return { customerName, phone, totalAmount, shippingFee, discountAmount, codAmount, paymentMethod };
+}
+
 function mapOrder(o) {
   const codes = orderCodeCandidates(o);
   const fullCode = String(o.channel_order_number || o.sapo_order_code || o.order_code || o.code || o.order_number || codes[0] || 'Không rõ mã');
@@ -200,6 +244,7 @@ function mapOrder(o) {
     createdTs: getOrderDate(o),
     carrier: getCarrier(o),
     address: getAddress(o),
+    ...getPrintFields(o),
     items: getItems(o),
     status: String(o.channel_order_status || o.status_name || o.status || '')
   };
@@ -264,6 +309,11 @@ async function configHealth(env) {
     sync: {
       endpointReady: Boolean(String(env.SAPO_SYNC_SECRET || '').trim()),
       kvBindingReady: Boolean(env.SAPO_AUTH_KV)
+    },
+    printing: {
+      brokerConfigured: Boolean(env.PRINT_BROKER),
+      agentTokenConfigured: Boolean(String(env.PRINT_AGENT_TOKEN || '').trim()),
+      webPinConfigured: Boolean(String(env.PRINT_WEB_PIN || '').trim())
     },
     query: {
       originConfigured: Boolean(String(env.SAPO_ORIGIN || '').trim()),
@@ -402,10 +452,141 @@ async function searchOrders(request, env) {
   }
 }
 
+async function handlePrintRequest(request, env) {
+  if (request.method !== 'POST') return json({ ok: false, error: 'Method not allowed.' }, 405);
+  const expectedPin = String(env.PRINT_WEB_PIN || '');
+  const suppliedPin = String(request.headers.get('X-Print-Pin') || '');
+  if (!expectedPin) return json({ ok: false, error: 'Chưa cấu hình Secret PRINT_WEB_PIN trên Cloudflare.' }, 503);
+  if (!constantTimeEqual(suppliedPin, expectedPin)) return json({ ok: false, error: 'Mã PIN in không đúng.' }, 401);
+  const bodyText = await request.text();
+  if (bodyText.length > 30000) return json({ ok: false, error: 'Dữ liệu bill quá lớn.' }, 413);
+  let payload;
+  try { payload = JSON.parse(bodyText); } catch { return json({ ok: false, error: 'Dữ liệu bill không hợp lệ.' }, 400); }
+  const order = payload?.order;
+  if (!order || typeof order !== 'object' || !String(order.code || '').trim()) {
+    return json({ ok: false, error: 'Thiếu thông tin đơn hàng để in.' }, 400);
+  }
+  if (!Array.isArray(order.items) || order.items.length > 200) return json({ ok: false, error: 'Danh sách sản phẩm không hợp lệ.' }, 400);
+  if (!env.PRINT_BROKER) return json({ ok: false, error: 'Print Broker chưa được cấu hình trên Cloudflare.' }, 503);
+  const id = env.PRINT_BROKER.idFromName('store-printer');
+  const stub = env.PRINT_BROKER.get(id);
+  return stub.fetch('https://print-broker/dispatch', {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ order })
+  });
+}
+
+async function printAgentStatus(env) {
+  if (!env.PRINT_BROKER) return json({ ok: true, connected: false, error: 'Print Broker chưa được cấu hình.' });
+  const id = env.PRINT_BROKER.idFromName('store-printer');
+  return env.PRINT_BROKER.get(id).fetch('https://print-broker/status');
+}
+
+export class PrintBroker {
+  constructor(state, env) {
+    this.state = state;
+    this.env = env;
+    this.pending = new Map();
+    this.busy = false;
+  }
+
+  async fetch(request) {
+    const url = new URL(request.url);
+    if (url.pathname.endsWith('/connect')) {
+      const expected = String(this.env.PRINT_AGENT_TOKEN || '');
+      const supplied = String(request.headers.get('Authorization') || '').replace(/^Bearer\s+/i, '').trim();
+      if (!expected || !constantTimeEqual(supplied, expected)) return json({ ok: false, error: 'Agent token không đúng.' }, 401);
+      if (request.headers.get('Upgrade') !== 'websocket') return json({ ok: false, error: 'Cần kết nối WebSocket.' }, 426);
+      for (const existing of this.state.getWebSockets()) {
+        try { existing.close(4001, 'Replaced by a new Print Agent connection.'); } catch (_) {}
+      }
+      const pair = new WebSocketPair();
+      const client = pair[0];
+      const server = pair[1];
+      this.state.acceptWebSocket(server);
+      server.serializeAttachment({ connectedAt: Date.now(), lastSeen: Date.now() });
+      server.send(JSON.stringify({ type: 'connected', message: 'Print Agent đã kết nối.' }));
+      return new Response(null, { status: 101, webSocket: client });
+    }
+
+    if (url.pathname.endsWith('/status')) {
+      const sockets = this.state.getWebSockets();
+      const latest = sockets.length ? (sockets[0].deserializeAttachment() || {}) : {};
+      return json({ ok: true, connected: sockets.length > 0, agents: sockets.length, lastSeen: latest.lastSeen || null, busy: this.busy });
+    }
+
+    if (url.pathname.endsWith('/dispatch') && request.method === 'POST') {
+      if (this.busy) return json({ ok: false, error: 'Đang có một lệnh in khác được xử lý. Vui lòng thử lại sau.' }, 409);
+      const sockets = this.state.getWebSockets();
+      if (!sockets.length) return json({ ok: false, error: 'Máy tính in chưa kết nối. Hãy bật Windows và Print Agent rồi thử lại.' }, 503);
+      let body;
+      try { body = await request.json(); } catch { return json({ ok: false, error: 'Dữ liệu lệnh in không hợp lệ.' }, 400); }
+      const requestId = crypto.randomUUID();
+      const socket = sockets[0];
+      this.busy = true;
+      try {
+        const result = await new Promise((resolve) => {
+          const timer = setTimeout(() => {
+            this.pending.delete(requestId);
+            resolve({ ok: false, error: 'Print Agent không phản hồi kịp thời. Không tự động gửi lại để tránh in trùng.' });
+          }, 25000);
+          this.pending.set(requestId, { resolve, timer });
+          try {
+            socket.send(JSON.stringify({ type: 'print', requestId, order: body.order }));
+          } catch (_) {
+            clearTimeout(timer);
+            this.pending.delete(requestId);
+            resolve({ ok: false, error: 'Kết nối với Print Agent bị gián đoạn.' });
+          }
+        });
+        return json(result, result.ok ? 200 : 502);
+      } finally {
+        this.busy = false;
+      }
+    }
+    return json({ ok: false, error: 'Không tìm thấy endpoint Print Broker.' }, 404);
+  }
+
+  async webSocketMessage(socket, message) {
+    let data;
+    try { data = JSON.parse(typeof message === 'string' ? message : new TextDecoder().decode(message)); }
+    catch { return; }
+    const attachment = socket.deserializeAttachment() || {};
+    socket.serializeAttachment({ ...attachment, lastSeen: Date.now(), agentVersion: String(data.agentVersion || attachment.agentVersion || '') });
+    if (data.type === 'ping') {
+      try { socket.send(JSON.stringify({ type: 'pong', at: Date.now() })); } catch (_) {}
+      return;
+    }
+    if (data.type === 'print-result' && data.requestId) {
+      const entry = this.pending.get(String(data.requestId));
+      if (!entry) return;
+      clearTimeout(entry.timer);
+      this.pending.delete(String(data.requestId));
+      entry.resolve({ ok: Boolean(data.ok), message: String(data.message || ''), error: data.ok ? undefined : String(data.error || 'Không thể gửi lệnh đến máy in.'), printerName: String(data.printerName || '') });
+    }
+  }
+
+  async webSocketClose(socket) {
+    try { socket.close(); } catch (_) {}
+  }
+
+  async webSocketError(socket) {
+    try { socket.close(); } catch (_) {}
+  }
+}
+
 export default {
   async fetch(request, env) {
     const url = new URL(request.url);
     if (request.method === 'GET' && url.pathname === '/api/health/config') return json(await configHealth(env));
+    if (url.pathname === '/api/print-agent/connect') {
+      if (!env.PRINT_BROKER) return json({ ok: false, error: 'Print Broker chưa được cấu hình.' }, 503);
+      const id = env.PRINT_BROKER.idFromName('store-printer');
+      return env.PRINT_BROKER.get(id).fetch(request);
+    }
+    if (request.method === 'GET' && url.pathname === '/api/print/status') return printAgentStatus(env);
+    if (url.pathname === '/api/print') return handlePrintRequest(request, env);
     if (url.pathname === '/api/sync-sapo-auth') {
       if (request.method === 'OPTIONS') {
         return new Response(null, { status: 204, headers: {

@@ -45,3 +45,11 @@ Tiếp theo kiểm tra `/api/search?q=<mã-đơn-thật>`. Lỗi `Máy chủ ch�
 - Endpoint chẩn đoán `/api/health/config` không bao giờ trả nội dung Secret.
 
 **Giới hạn:** Bản này không thể khôi phục phần địa chỉ mà chính API Sapo đã che/mask hoặc không trả về. Nó chỉ tìm trong dữ liệu máy chủ nhận được.
+
+## In bill trực tiếp
+
+- Mỗi đơn trong kết quả tra cứu có nút `In bill`.
+- Cloudflare Worker chuyển lệnh đồng bộ qua Durable Object WebSocket đến Windows Print Agent đang kết nối; không lưu hàng đợi và không tự in bù.
+- Windows Print Agent dùng driver/máy in mặc định của Windows hoặc tên máy in khai báo trong `print-agent/config.json`.
+- Cần tạo Secret `PRINT_AGENT_TOKEN` và `PRINT_WEB_PIN` trên Cloudflare trước khi deploy tính năng in.
+- Xem `PRINT-AGENT-HUONG-DAN.md` để cài đặt và ghép nối Agent.
