@@ -1,6 +1,6 @@
 {
   "name": "tracuunhanh-cloudflare-workers",
-  "version": "1.3.0",
+  "version": "2.0.0",
   "private": true,
   "description": "Tra cứu đơn Sapo và in bill trực tiếp trên Cloudflare Workers",
   "scripts": {
@@ -11,5 +11,6 @@
   },
   "devDependencies": {
     "wrangler": "^4.0.0"
-  }
+  },
+  "type": "module"
 }

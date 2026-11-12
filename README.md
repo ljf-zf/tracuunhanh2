@@ -48,8 +48,9 @@ Tiếp theo kiểm tra `/api/search?q=<mã-đơn-thật>`. Lỗi `Máy chủ ch�
 
 ## In bill trực tiếp
 
-- Mỗi đơn trong kết quả tra cứu có nút `In bill`.
+- Mỗi đơn trong kết quả tra cứu có nút `In bill` và `In vận đơn Sapo`.
 - Cloudflare Worker chuyển lệnh đồng bộ qua Durable Object WebSocket đến Windows Print Agent đang kết nối; không lưu hàng đợi và không tự in bù.
 - Windows Print Agent dùng driver/máy in mặc định của Windows hoặc tên máy in khai báo trong `print-agent/config.json`.
-- Cần tạo Secret `PRINT_AGENT_TOKEN` và `PRINT_WEB_PIN` trên Cloudflare trước khi deploy tính năng in.
-- Xem `PRINT-AGENT-HUONG-DAN.md` để cài đặt và ghép nối Agent.
+- `In vận đơn Sapo` dùng Sapo Print Bridge Extension trên Edge để kích hoạt endpoint in gốc trong phiên Sapo, nhận PDF từ notification rồi chuyển tới Agent. Cần cài SumatraPDF để in PDF.
+- Cần tạo Secret `PRINT_AGENT_TOKEN`, `PRINT_WEB_PIN` và `SAPO_BRIDGE_TOKEN` trên Cloudflare trước khi deploy tính năng in. Cài extension `sapo-bridge-extension` trên Edge và SumatraPDF trên Windows để dùng nút `In vận đơn Sapo`.
+- Xem `PRINT-AGENT-HUONG-DAN.md` để cài đặt Agent, SumatraPDF và Sapo Print Bridge Extension.

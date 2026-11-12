@@ -1,7 +1,7 @@
 const cache = new Map();
 const MAX_PAGES_DEFAULT = 10;
 const CACHE_SECONDS_DEFAULT = 10;
-const WORKER_VERSION = '1.3.0';
+const WORKER_VERSION = '2.0.0';
 const AUTH_KV_KEY = 'sapo-auth-current';
 const AUTH_KV_TTL_SECONDS = 60 * 60 * 24 * 60;
 
@@ -313,7 +313,8 @@ async function configHealth(env) {
     printing: {
       brokerConfigured: Boolean(env.PRINT_BROKER),
       agentTokenConfigured: Boolean(String(env.PRINT_AGENT_TOKEN || '').trim()),
-      webPinConfigured: Boolean(String(env.PRINT_WEB_PIN || '').trim())
+      webPinConfigured: Boolean(String(env.PRINT_WEB_PIN || '').trim()),
+      sapoBridgeConfigured: Boolean(String(env.SAPO_BRIDGE_TOKEN || '').trim())
     },
     query: {
       originConfigured: Boolean(String(env.SAPO_ORIGIN || '').trim()),
@@ -452,6 +453,69 @@ async function searchOrders(request, env) {
   }
 }
 
+
+function validSapoPdfUrl(value) {
+  try {
+    const url = new URL(String(value || ''));
+    return url.protocol === 'https:' &&
+      url.hostname === 'social.dktcdn.net' &&
+      url.pathname.startsWith('/shopee/') &&
+      url.pathname.includes('/prints_orders/') &&
+      url.pathname.toLowerCase().endsWith('.pdf') &&
+      !url.username && !url.password;
+  } catch (_) { return false; }
+}
+
+async function handleSapoPrintEvent(request, env) {
+  if (request.method !== 'POST') return json({ ok: false, error: 'Method not allowed.' }, 405);
+  const expected = String(env.SAPO_BRIDGE_TOKEN || '');
+  const supplied = String(request.headers.get('X-Sapo-Bridge-Key') || '');
+  if (!expected) return json({ ok: false, error: 'Chưa cấu hình Secret SAPO_BRIDGE_TOKEN trên Cloudflare.' }, 503);
+  if (!constantTimeEqual(supplied, expected)) return json({ ok: false, error: 'Bridge token không đúng.' }, 401);
+  const text = await request.text();
+  if (text.length > 50000) return json({ ok: false, error: 'Thông báo Sapo quá lớn.' }, 413);
+  let body;
+  try { body = JSON.parse(text); } catch { return json({ ok: false, error: 'Dữ liệu sự kiện không hợp lệ.' }, 400); }
+  const event = body?.event || body;
+  if (event?.type !== 'PRINT_ORDER' || event?.status !== 'SUCCESS' || !Array.isArray(event?.order_bills)) {
+    return json({ ok: false, error: 'Không phải sự kiện PRINT_ORDER thành công.' }, 400);
+  }
+  const records = [];
+  for (const bill of event.order_bills.slice(0, 100)) {
+    const pdfUrl = String(bill?.data_to_print || '');
+    const orderId = String(bill?.order_id || '').trim();
+    const orderCode = String(bill?.sapo_order_code || bill?.channel_order_number || '').trim();
+    if (!bill?.success || !orderId || !validSapoPdfUrl(pdfUrl)) continue;
+    records.push({ orderId, orderCode, pdfUrl, tenantId: String(event.tenant_id || ''), channelType: Number(event.channel_type || 0), createdAt: Date.now() });
+  }
+  if (!records.length) return json({ ok: false, error: 'Sự kiện không có PDF Sapo hợp lệ.' }, 422);
+  if (!env.PRINT_BROKER) return json({ ok: false, error: 'Print Broker chưa được cấu hình.' }, 503);
+  const id = env.PRINT_BROKER.idFromName('store-printer');
+  const result = await env.PRINT_BROKER.get(id).fetch('https://print-broker/event', {
+    method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ records })
+  });
+  return result;
+}
+
+async function handleOriginalPrintRequest(request, env) {
+  if (request.method !== 'POST') return json({ ok: false, error: 'Method not allowed.' }, 405);
+  const expectedPin = String(env.PRINT_WEB_PIN || '');
+  const suppliedPin = String(request.headers.get('X-Print-Pin') || '');
+  if (!expectedPin) return json({ ok: false, error: 'Chưa cấu hình Secret PRINT_WEB_PIN trên Cloudflare.' }, 503);
+  if (!constantTimeEqual(suppliedPin, expectedPin)) return json({ ok: false, error: 'Mã PIN in không đúng.' }, 401);
+  let body;
+  try { body = await request.json(); } catch { return json({ ok: false, error: 'Dữ liệu yêu cầu không hợp lệ.' }, 400); }
+  const orderId = String(body?.order?.id || body?.orderId || '').trim();
+  const orderCode = String(body?.order?.code || body?.orderCode || '').trim();
+  if (!orderId && !orderCode) return json({ ok: false, error: 'Thiếu mã đơn hoặc ID đơn hàng.' }, 400);
+  if (!env.PRINT_BROKER) return json({ ok: false, error: 'Print Broker chưa được cấu hình.' }, 503);
+  const id = env.PRINT_BROKER.idFromName('store-printer');
+  return env.PRINT_BROKER.get(id).fetch('https://print-broker/request-original', {
+    method: 'POST', headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ orderId, orderCode })
+  });
+}
+
 async function handlePrintRequest(request, env) {
   if (request.method !== 'POST') return json({ ok: false, error: 'Method not allowed.' }, 405);
   const expectedPin = String(env.PRINT_WEB_PIN || '');
@@ -488,6 +552,7 @@ export class PrintBroker {
     this.state = state;
     this.env = env;
     this.pending = new Map();
+    this.pendingOriginal = new Map();
     this.busy = false;
   }
 
@@ -499,26 +564,121 @@ export class PrintBroker {
       if (!expected || !constantTimeEqual(supplied, expected)) return json({ ok: false, error: 'Agent token không đúng.' }, 401);
       if (request.headers.get('Upgrade') !== 'websocket') return json({ ok: false, error: 'Cần kết nối WebSocket.' }, 426);
       for (const existing of this.state.getWebSockets()) {
-        try { existing.close(4001, 'Replaced by a new Print Agent connection.'); } catch (_) {}
+        const attachment = existing.deserializeAttachment() || {};
+        if (attachment.role !== 'bridge') { try { existing.close(4001, 'Replaced by a new Print Agent connection.'); } catch (_) {} }
       }
       const pair = new WebSocketPair();
       const client = pair[0];
       const server = pair[1];
       this.state.acceptWebSocket(server);
-      server.serializeAttachment({ connectedAt: Date.now(), lastSeen: Date.now() });
+      server.serializeAttachment({ role: 'agent', connectedAt: Date.now(), lastSeen: Date.now() });
       server.send(JSON.stringify({ type: 'connected', message: 'Print Agent đã kết nối.' }));
       return new Response(null, { status: 101, webSocket: client });
     }
 
+    if (url.pathname.endsWith('/bridge-connect')) {
+      const expected = String(this.env.SAPO_BRIDGE_TOKEN || '');
+      const protocolHeader = String(request.headers.get('Sec-WebSocket-Protocol') || '');
+      const suppliedProtocol = protocolHeader.split(',').map(v => v.trim()).find(v => v.startsWith('sapo-bridge.'));
+      const supplied = suppliedProtocol ? suppliedProtocol.slice('sapo-bridge.'.length) : '';
+      if (!expected || !constantTimeEqual(supplied, expected)) return json({ ok: false, error: 'Bridge token không đúng.' }, 401);
+      if (request.headers.get('Upgrade') !== 'websocket') return json({ ok: false, error: 'Cần kết nối WebSocket.' }, 426);
+      for (const existing of this.state.getWebSockets()) {
+        const attachment = existing.deserializeAttachment() || {};
+        if (attachment.role === 'bridge') { try { existing.close(4001, 'Bridge reconnected'); } catch (_) {} }
+      }
+      const pair = new WebSocketPair();
+      this.state.acceptWebSocket(pair[1]);
+      pair[1].serializeAttachment({ role: 'bridge', connectedAt: Date.now(), lastSeen: Date.now() });
+      pair[1].send(JSON.stringify({ type: 'bridge-connected' }));
+      return new Response(null, { status: 101, webSocket: pair[0], headers: { 'Sec-WebSocket-Protocol': suppliedProtocol } });
+    }
+
     if (url.pathname.endsWith('/status')) {
       const sockets = this.state.getWebSockets();
-      const latest = sockets.length ? (sockets[0].deserializeAttachment() || {}) : {};
-      return json({ ok: true, connected: sockets.length > 0, agents: sockets.length, lastSeen: latest.lastSeen || null, busy: this.busy });
+      const agents = sockets.filter(socket => (socket.deserializeAttachment() || {}).role !== 'bridge');
+      const bridges = sockets.filter(socket => (socket.deserializeAttachment() || {}).role === 'bridge');
+      const latest = agents.length ? (agents[0].deserializeAttachment() || {}) : {};
+      return json({ ok: true, connected: agents.length > 0, agents: agents.length, bridgeConnected: bridges.length > 0, lastSeen: latest.lastSeen || null, busy: this.busy });
+    }
+
+    if (url.pathname.endsWith('/event') && request.method === 'POST') {
+      let body;
+      try { body = await request.json(); } catch { return json({ ok: false, error: 'Sự kiện không hợp lệ.' }, 400); }
+      const records = Array.isArray(body.records) ? body.records.slice(0, 100) : [];
+      let saved = 0, dispatched = 0;
+      for (const record of records) {
+        if (!record?.orderId || !validSapoPdfUrl(record.pdfUrl)) continue;
+        const safe = { orderId: String(record.orderId), orderCode: String(record.orderCode || ''), pdfUrl: String(record.pdfUrl), createdAt: Date.now() };
+        await this.state.storage.put(`sapo-print-id:${safe.orderId}`, safe, { expirationTtl: 60 * 60 * 12 });
+        if (safe.orderCode) await this.state.storage.put(`sapo-print-code:${safe.orderCode}`, safe, { expirationTtl: 60 * 60 * 12 });
+        saved++;
+        const waiting = [...this.pendingOriginal.values()].find(item =>
+          (item.orderId && item.orderId === safe.orderId) ||
+          (item.orderCode && safe.orderCode && item.orderCode === safe.orderCode)
+        );
+        if (waiting) {
+          clearTimeout(waiting.timer);
+          this.pendingOriginal.delete(waiting.requestId);
+          const result = await this.dispatchPdfRecord(safe, waiting.requestId);
+          waiting.resolve(result);
+          if (result.ok) dispatched++;
+        }
+      }
+      return json({ ok: true, saved, dispatched });
+    }
+
+    if (url.pathname.endsWith('/request-original') && request.method === 'POST') {
+      if (this.busy) return json({ ok: false, error: 'Đang có một lệnh in khác được xử lý. Vui lòng thử lại sau.' }, 409);
+      const sockets = this.state.getWebSockets();
+      const agent = sockets.find(socket => (socket.deserializeAttachment() || {}).role !== 'bridge');
+      const bridge = sockets.find(socket => (socket.deserializeAttachment() || {}).role === 'bridge');
+      if (!agent) return json({ ok: false, error: 'Máy tính in chưa kết nối. Hãy bật Windows và Print Agent.' }, 503);
+      if (!bridge) return json({ ok: false, error: 'Sapo Print Bridge chưa kết nối. Hãy mở Edge, đăng nhập Sapo và bật extension.' }, 503);
+      let body;
+      try { body = await request.json(); } catch { return json({ ok: false, error: 'Dữ liệu yêu cầu không hợp lệ.' }, 400); }
+      const orderId = String(body.orderId || '');
+      const orderCode = String(body.orderCode || '');
+      let record = orderId ? await this.state.storage.get(`sapo-print-id:${orderId}`) : null;
+      if (!record && orderCode) record = await this.state.storage.get(`sapo-print-code:${orderCode}`);
+      if (record && validSapoPdfUrl(record.pdfUrl)) {
+        this.busy = true;
+        try {
+          const result = await this.dispatchPdfRecord(record, crypto.randomUUID());
+          if (result.ok) {
+            if (orderId) await this.state.storage.delete(`sapo-print-id:${orderId}`);
+            if (record.orderCode) await this.state.storage.delete(`sapo-print-code:${record.orderCode}`);
+          }
+          return json(result, result.ok ? 200 : 502);
+        } finally { this.busy = false; }
+      }
+      const requestId = crypto.randomUUID();
+      this.busy = true;
+      try {
+        const result = await new Promise(resolve => {
+          const timer = setTimeout(() => {
+            this.pendingOriginal.delete(requestId);
+            resolve({ ok: false, error: 'Sapo không trả PDF trong thời gian chờ. Kiểm tra Edge, phiên đăng nhập Sapo và kết nối Bridge.' });
+          }, 45000);
+          this.pendingOriginal.set(requestId, { requestId, orderId, orderCode, resolve, timer });
+          try {
+            bridge.send(JSON.stringify({ type: 'trigger-sapo-print', requestId, orderId, orderCode }));
+          } catch (_) {
+            clearTimeout(timer); this.pendingOriginal.delete(requestId);
+            resolve({ ok: false, error: 'Không gửi được yêu cầu tới Sapo Print Bridge.' });
+          }
+        });
+        if (result.ok) {
+          if (orderId) await this.state.storage.delete(`sapo-print-id:${orderId}`);
+          if (orderCode) await this.state.storage.delete(`sapo-print-code:${orderCode}`);
+        }
+        return json(result, result.ok ? 200 : 502);
+      } finally { this.busy = false; }
     }
 
     if (url.pathname.endsWith('/dispatch') && request.method === 'POST') {
       if (this.busy) return json({ ok: false, error: 'Đang có một lệnh in khác được xử lý. Vui lòng thử lại sau.' }, 409);
-      const sockets = this.state.getWebSockets();
+      const sockets = this.state.getWebSockets().filter(socket => (socket.deserializeAttachment() || {}).role !== 'bridge');
       if (!sockets.length) return json({ ok: false, error: 'Máy tính in chưa kết nối. Hãy bật Windows và Print Agent rồi thử lại.' }, 503);
       let body;
       try { body = await request.json(); } catch { return json({ ok: false, error: 'Dữ liệu lệnh in không hợp lệ.' }, 400); }
@@ -526,26 +686,53 @@ export class PrintBroker {
       const socket = sockets[0];
       this.busy = true;
       try {
-        const result = await new Promise((resolve) => {
+        const result = await new Promise(resolve => {
           const timer = setTimeout(() => {
             this.pending.delete(requestId);
             resolve({ ok: false, error: 'Print Agent không phản hồi kịp thời. Không tự động gửi lại để tránh in trùng.' });
           }, 25000);
           this.pending.set(requestId, { resolve, timer });
-          try {
-            socket.send(JSON.stringify({ type: 'print', requestId, order: body.order }));
-          } catch (_) {
-            clearTimeout(timer);
-            this.pending.delete(requestId);
+          try { socket.send(JSON.stringify({ type: 'print', requestId, order: body.order })); }
+          catch (_) {
+            clearTimeout(timer); this.pending.delete(requestId);
             resolve({ ok: false, error: 'Kết nối với Print Agent bị gián đoạn.' });
           }
         });
         return json(result, result.ok ? 200 : 502);
-      } finally {
-        this.busy = false;
-      }
+      } finally { this.busy = false; }
     }
+
     return json({ ok: false, error: 'Không tìm thấy endpoint Print Broker.' }, 404);
+  }
+
+  async dispatchPdfRecord(record, requestId) {
+    const sockets = this.state.getWebSockets();
+    const agent = sockets.find(item => (item.deserializeAttachment() || {}).role !== 'bridge');
+    if (!agent) return { ok: false, error: 'Print Agent đã ngắt kết nối.' };
+    let response;
+    try { response = await fetch(record.pdfUrl, { headers: { Accept: 'application/pdf' }, redirect: 'error' }); }
+    catch (_) { return { ok: false, error: 'Không tải được PDF gốc từ máy chủ Sapo.' }; }
+    if (!response.ok) return { ok: false, error: `Máy chủ PDF trả về HTTP ${response.status}.` };
+    const bytes = await response.arrayBuffer();
+    if (bytes.byteLength < 8 || bytes.byteLength > 12 * 1024 * 1024) return { ok: false, error: 'PDF không hợp lệ hoặc vượt giới hạn 12 MB.' };
+    if (new TextDecoder().decode(bytes.slice(0, 5)) !== '%PDF-') return { ok: false, error: 'Tệp Sapo trả về không phải PDF.' };
+    const binary = new Uint8Array(bytes);
+    let binaryString = '';
+    for (let i = 0; i < binary.length; i += 0x8000) binaryString += String.fromCharCode(...binary.subarray(i, i + 0x8000));
+    const pdfBase64 = btoa(binaryString);
+    return await new Promise(resolve => {
+      const timer = setTimeout(() => {
+        this.pending.delete(requestId);
+        resolve({ ok: false, error: 'Print Agent không phản hồi. Không tự động gửi lại để tránh in trùng.' });
+      }, 45000);
+      this.pending.set(requestId, { resolve, timer });
+      try {
+        agent.send(JSON.stringify({ type: 'print-original', requestId, orderCode: record.orderCode || record.orderId, pdfBase64, fileName: `sapo-${record.orderCode || record.orderId}.pdf` }));
+      } catch (_) {
+        clearTimeout(timer); this.pending.delete(requestId);
+        resolve({ ok: false, error: 'Kết nối với Print Agent bị gián đoạn.' });
+      }
+    });
   }
 
   async webSocketMessage(socket, message) {
@@ -558,7 +745,15 @@ export class PrintBroker {
       try { socket.send(JSON.stringify({ type: 'pong', at: Date.now() })); } catch (_) {}
       return;
     }
-    if (data.type === 'print-result' && data.requestId) {
+    if (data.type === 'bridge-trigger-error' && data.requestId) {
+      const entry = this.pendingOriginal.get(String(data.requestId));
+      if (entry) {
+        clearTimeout(entry.timer); this.pendingOriginal.delete(String(data.requestId));
+        entry.resolve({ ok: false, error: String(data.error || 'Không thể kích hoạt thao tác in trong Sapo.') });
+      }
+      return;
+    }
+    if ((data.type === 'print-result' || data.type === 'print-original-result') && data.requestId) {
       const entry = this.pending.get(String(data.requestId));
       if (!entry) return;
       clearTimeout(entry.timer);
@@ -580,13 +775,17 @@ export default {
   async fetch(request, env) {
     const url = new URL(request.url);
     if (request.method === 'GET' && url.pathname === '/api/health/config') return json(await configHealth(env));
-    if (url.pathname === '/api/print-agent/connect') {
+    if (url.pathname === '/api/print-agent/connect' || url.pathname === '/api/sapo/bridge/connect') {
       if (!env.PRINT_BROKER) return json({ ok: false, error: 'Print Broker chưa được cấu hình.' }, 503);
       const id = env.PRINT_BROKER.idFromName('store-printer');
-      return env.PRINT_BROKER.get(id).fetch(request);
+      const target = url.pathname.endsWith('/bridge/connect') ? 'bridge-connect' : 'connect';
+      const internal = new Request(`https://print-broker/${target}`, request);
+      return env.PRINT_BROKER.get(id).fetch(internal);
     }
     if (request.method === 'GET' && url.pathname === '/api/print/status') return printAgentStatus(env);
     if (url.pathname === '/api/print') return handlePrintRequest(request, env);
+    if (url.pathname === '/api/print-original') return handleOriginalPrintRequest(request, env);
+    if (url.pathname === '/api/sapo/print-event') return handleSapoPrintEvent(request, env);
     if (url.pathname === '/api/sync-sapo-auth') {
       if (request.method === 'OPTIONS') {
         return new Response(null, { status: 204, headers: {

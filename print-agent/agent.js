@@ -9,7 +9,7 @@ const WebSocket = require('ws');
 const ROOT = __dirname;
 const CONFIG_PATH = path.join(ROOT, 'config.json');
 const PRINT_SCRIPT = path.join(ROOT, 'print.ps1');
-const VERSION = '1.0.0';
+const VERSION = '2.0.0';
 let socket = null;
 let reconnectTimer = null;
 let heartbeatTimer = null;
@@ -36,6 +36,7 @@ function loadConfig() {
     workerUrl,
     agentToken,
     printerName: String(config.printerName || '').trim(),
+    pdfViewerPath: String(config.pdfViewerPath || '').trim(),
     heartbeatSeconds: Math.max(10, Math.min(60, Number(config.heartbeatSeconds) || 25))
   };
 }
@@ -98,6 +99,68 @@ function runPrint(order) {
   });
 }
 
+
+function findSumatra() {
+  const candidates = [
+    config.pdfViewerPath,
+    path.join(process.env.ProgramFiles || 'C:\\Program Files', 'SumatraPDF', 'SumatraPDF.exe'),
+    path.join(process.env['ProgramFiles(x86)'] || 'C:\\Program Files (x86)', 'SumatraPDF', 'SumatraPDF.exe'),
+    path.join(process.env.LOCALAPPDATA || '', 'SumatraPDF', 'SumatraPDF.exe')
+  ].filter(Boolean);
+  return candidates.find(candidate => fs.existsSync(candidate)) || '';
+}
+
+function runOriginalPdf(message) {
+  return new Promise((resolve, reject) => {
+    const raw = String(message.pdfBase64 || '');
+    if (!raw || raw.length > 16 * 1024 * 1024) return reject(new Error('Dữ liệu PDF trống hoặc vượt giới hạn 12 MB.'));
+    const pdf = Buffer.from(raw, 'base64');
+    if (pdf.length < 8 || pdf.length > 12 * 1024 * 1024 || pdf.subarray(0, 5).toString('ascii') !== '%PDF-') {
+      return reject(new Error('File nhận được không phải PDF hợp lệ.'));
+    }
+    const viewer = findSumatra();
+    if (!viewer) return reject(new Error('Chưa tìm thấy SumatraPDF. Hãy cài SumatraPDF trên Windows hoặc khai báo pdfViewerPath trong config.json.'));
+    const safeName = String(message.fileName || `sapo-${Date.now()}.pdf`).replace(/[^a-zA-Z0-9._-]/g, '_').slice(0, 100);
+    const tempFile = path.join(os.tmpdir(), `${Date.now()}-${safeName}`);
+    fs.writeFileSync(tempFile, pdf, { flag: 'wx' });
+    const printerName = config.printerName;
+    const args = ['-silent', '-exit-on-print'];
+    if (printerName) args.push('-print-to', printerName);
+    else args.push('-print-to-default');
+    args.push(tempFile);
+    const child = spawn(viewer, args, { windowsHide: true, stdio: ['ignore', 'ignore', 'pipe'] });
+    let stderr = '';
+    child.stderr.setEncoding('utf8').on('data', chunk => { stderr += chunk; });
+    const cleanup = () => { try { fs.unlinkSync(tempFile); } catch (_) {} };
+    child.on('error', error => { cleanup(); reject(new Error(`Không chạy được SumatraPDF: ${error.message}`)); });
+    child.on('close', code => {
+      cleanup();
+      if (code !== 0) return reject(new Error(`SumatraPDF không in thành công (mã ${code}). ${stderr.slice(0, 400)}`));
+      resolve({ ok: true, message: 'Đã gửi PDF vận đơn gốc Sapo đến Windows Print Spooler.', printerName: printerName || 'Máy in mặc định Windows' });
+    });
+  });
+}
+
+async function handleOriginalPrint(message) {
+  const requestId = String(message.requestId || '');
+  if (!requestId) return;
+  if (busy) {
+    send({ type: 'print-original-result', requestId, ok: false, error: 'Print Agent đang xử lý một lệnh in khác.' });
+    return;
+  }
+  busy = true;
+  const code = String(message.orderCode || 'đơn hàng');
+  log(`Nhận PDF vận đơn gốc Sapo ${code}.`);
+  try {
+    const result = await runOriginalPdf(message);
+    log(`Đã gửi PDF gốc ${code} đến máy in ${result.printerName}.`);
+    send({ type: 'print-original-result', requestId, ok: true, message: result.message, printerName: result.printerName });
+  } catch (error) {
+    log(`Lỗi in PDF gốc ${code}: ${error.message}`);
+    send({ type: 'print-original-result', requestId, ok: false, error: error.message });
+  } finally { busy = false; }
+}
+
 async function handlePrint(message) {
   const requestId = String(message.requestId || '');
   if (!requestId) return;
@@ -149,6 +212,7 @@ function connect() {
     try { message = JSON.parse(raw.toString('utf8')); } catch (_) { return; }
     if (message.type === 'connected') log(message.message || 'Kết nối đã sẵn sàng.');
     if (message.type === 'print') handlePrint(message);
+    if (message.type === 'print-original') handleOriginalPrint(message);
   });
   next.on('close', (code, reason) => {
     clearInterval(heartbeatTimer);
@@ -171,7 +235,7 @@ function shutdown() {
 process.on('SIGINT', () => { shutdown(); process.exit(0); });
 process.on('SIGTERM', () => { shutdown(); process.exit(0); });
 
-log(`Sapo Direct Print Agent v${VERSION}`);
+log(`Sapo Direct Print Agent v${VERSION} · PDF gốc Sapo`);
 log(`Máy tính: ${os.hostname()} · Hệ điều hành: ${os.platform()}`);
 log(config.printerName ? `Máy in chỉ định: ${config.printerName}` : 'Sử dụng máy in mặc định của Windows.');
 connect();

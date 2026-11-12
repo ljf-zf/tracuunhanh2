@@ -1,0 +1,49 @@
+{
+  "manifest_version": 3,
+  "name": "Sapo Print Bridge",
+  "version": "1.0.0",
+  "description": "Chuyển sự kiện PRINT_ORDER và PDF vận đơn gốc từ phiên Sapo tới Tra cứu nhanh.",
+  "permissions": [
+    "storage",
+    "webNavigation"
+  ],
+  "host_permissions": [
+    "https://market-place.sapoapps.vn/*",
+    "https://*.mysapogo.com/*"
+  ],
+  "optional_host_permissions": [
+    "https://*/*"
+  ],
+  "background": {
+    "service_worker": "background.js"
+  },
+  "action": {
+    "default_title": "Sapo Print Bridge",
+    "default_popup": "popup.html"
+  },
+  "content_scripts": [
+    {
+      "matches": [
+        "https://market-place.sapoapps.vn/*",
+        "https://*.mysapogo.com/*"
+      ],
+      "js": [
+        "hook-main.js"
+      ],
+      "run_at": "document_start",
+      "world": "MAIN",
+      "all_frames": true
+    },
+    {
+      "matches": [
+        "https://market-place.sapoapps.vn/*",
+        "https://*.mysapogo.com/*"
+      ],
+      "js": [
+        "content.js"
+      ],
+      "run_at": "document_start",
+      "all_frames": true
+    }
+  ]
+}

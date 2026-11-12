@@ -3,5 +3,6 @@
   "agentToken": "PASTE_THE_SAME_PRINT_AGENT_TOKEN_CONFIGURED_ON_CLOUDFLARE",
   "printerName": "",
   "heartbeatSeconds": 25,
-  "shopName": ""
+  "shopName": "",
+  "pdfViewerPath": ""
 }

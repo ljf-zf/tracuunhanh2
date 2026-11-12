@@ -1,6 +1,6 @@
 {
   "name": "sapo-direct-print-agent",
-  "version": "1.0.0",
+  "version": "2.0.0",
   "private": true,
   "description": "Windows Print Agent for the Sapo order lookup web app",
   "main": "agent.js",
@@ -8,6 +8,10 @@
     "start": "node agent.js",
     "check": "node --check agent.js"
   },
-  "engines": { "node": ">=20" },
-  "dependencies": { "ws": "^8.18.3" }
+  "engines": {
+    "node": ">=20"
+  },
+  "dependencies": {
+    "ws": "^8.18.3"
+  }
 }

@@ -1,0 +1,6 @@
+<!doctype html><html lang="vi"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Sapo Print Bridge</title><style>
+body{font:14px Arial,sans-serif;width:320px;margin:0;padding:16px;color:#17251d;background:#f7faf7}h3{margin:0 0 12px}label{display:block;font-weight:700;margin:12px 0 5px}input{box-sizing:border-box;width:100%;padding:10px;border:1px solid #cbd5ce;border-radius:8px}button{width:100%;margin-top:14px;padding:11px;border:0;border-radius:8px;background:#166534;color:white;font-weight:700}small{color:#64748b;line-height:1.5}#status{margin-top:10px;color:#166534}
+</style></head><body><h3>Sapo Print Bridge</h3><small>Kết nối phiên Sapo trên Edge với Cloudflare Print Broker. Không cần nhập token Sapo.</small>
+<label>Worker URL</label><input id="workerUrl" placeholder="https://sku.example.workers.dev">
+<label>SAPO_BRIDGE_TOKEN</label><input id="bridgeToken" type="password" placeholder="Secret đã tạo trên Cloudflare">
+<button id="save">Lưu cấu hình và cấp quyền</button><div id="status"></div><script src="popup.js"></script></body></html>

@@ -23,7 +23,8 @@
     "required": [
       "SAPO_SYNC_SECRET",
       "PRINT_AGENT_TOKEN",
-      "PRINT_WEB_PIN"
+      "PRINT_WEB_PIN",
+      "SAPO_BRIDGE_TOKEN"
     ]
   },
   "durable_objects": {

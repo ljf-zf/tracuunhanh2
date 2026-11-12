@@ -43,7 +43,7 @@ function renderOrders(data) {
       ${order.trackingCode ? `<div class="tracking-code">Mã vận đơn: ${escapeHtml(order.trackingCode)}</div>` : ''}
       ${order.address ? `<div class="order-address">${escapeHtml(order.address)}</div>` : ''}
       ${items}
-      <div class="order-actions"><button type="button" class="print-button" data-print-order="${escapeHtml(key)}">▣ In bill</button></div>
+      <div class="order-actions"><button type="button" class="print-button" data-print-order="${escapeHtml(key)}">▣ In bill</button><button type="button" class="print-original-button" data-print-original="${escapeHtml(key)}">▤ In vận đơn Sapo</button></div>
     </article>`;
   }).join('');
 }
@@ -54,11 +54,12 @@ async function updatePrinterStatus() {
     const response = await fetch('/api/print/status', { credentials: 'same-origin', cache: 'no-store' });
     const data = await response.json().catch(() => ({}));
     const connected = response.ok && Boolean(data.connected);
-    indicator.className = `printer-status ${connected ? 'online' : 'offline'}`;
-    indicator.innerHTML = `<span class="printer-dot"></span>${connected ? 'Máy tính in đã kết nối' : 'Máy tính in chưa kết nối'}`;
+    const bridgeConnected = response.ok && Boolean(data.bridgeConnected);
+    indicator.className = `printer-status ${connected && bridgeConnected ? 'online' : 'offline'}`;
+    indicator.innerHTML = `<span class="printer-dot"></span>${connected ? 'Máy in đã kết nối' : 'Máy in chưa kết nối'} · ${bridgeConnected ? 'Sapo Bridge đã kết nối' : 'Sapo Bridge chưa kết nối'}`;
   } catch (_) {
     indicator.className = 'printer-status offline';
-    indicator.innerHTML = '<span class="printer-dot"></span>Không kiểm tra được máy in';
+    indicator.innerHTML = '<span class="printer-dot"></span>Không kiểm tra được kết nối máy in';
   }
 }
 
@@ -85,6 +86,37 @@ async function printOrder(orderKey, button) {
     if (!response.ok || !data.ok) throw new Error(data.error || data.message || `Không in được (${response.status}).`);
     setStatus(`Đã gửi lệnh in ${order.code} đến ${data.printerName || 'máy in'}. ${data.message || ''}`, 'success');
     button.textContent = 'Đã gửi in';
+  } catch (error) {
+    setStatus(error.message, 'error');
+    button.textContent = originalText;
+    button.disabled = false;
+    updatePrinterStatus();
+  }
+}
+
+
+async function printOriginalOrder(orderKey, button) {
+  const order = currentOrders.get(String(orderKey));
+  if (!order) { setStatus('Không tìm thấy đơn hàng. Hãy tra cứu lại.', 'error'); return; }
+  if (!printPin) {
+    printPin = String(window.prompt('Nhập mã PIN in do quản trị viên cung cấp:') || '').trim();
+    if (!printPin) return;
+  }
+  button.disabled = true;
+  const originalText = button.textContent;
+  button.textContent = 'Đang lấy PDF Sapo…';
+  setStatus(`Đang tìm PDF vận đơn gốc của ${order.code}…`);
+  try {
+    const response = await fetch('/api/print-original', {
+      method: 'POST', credentials: 'same-origin',
+      headers: { 'content-type': 'application/json', 'X-Print-Pin': printPin },
+      body: JSON.stringify({ order: { id: order.id, code: order.code } })
+    });
+    const data = await response.json().catch(() => ({}));
+    if (response.status === 401) printPin = '';
+    if (!response.ok || !data.ok) throw new Error(data.error || `Không in được vận đơn (${response.status}).`);
+    setStatus(`Đã gửi vận đơn Sapo của ${order.code} đến ${data.printerName || 'máy in'}. ${data.message || ''}`, 'success');
+    button.textContent = 'Đã gửi vận đơn';
   } catch (error) {
     setStatus(error.message, 'error');
     button.textContent = originalText;
@@ -137,6 +169,8 @@ $('clear').addEventListener('click', () => {
   setStatus('');
 });
 $('results').addEventListener('click', event => {
+  const originalButton = event.target.closest('[data-print-original]');
+  if (originalButton) { printOriginalOrder(originalButton.dataset.printOriginal, originalButton); return; }
   const button = event.target.closest('[data-print-order]');
   if (button) printOrder(button.dataset.printOrder, button);
 });
