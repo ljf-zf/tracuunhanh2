@@ -152,7 +152,7 @@ async function printOriginalOrder(orderKey, button) {
     });
     const data = await response.json().catch(() => ({}));
     if (!response.ok || !data.ok) throw new Error(data.error || `Không in được vận đơn (${response.status}).`);
-    setStatus(`Đã gửi vận đơn Sapo của ${order.code} đến ${data.printerName || 'máy in'}. ${data.message || ''}`, 'success');
+    setStatus(`Đã gửi vận đơn Sapo của ${order.code} đến ${data.printerName || 'máy in'}.`, 'success');
     button.textContent = 'Đã gửi vận đơn';
   } catch (error) {
     setStatus(error.message, 'error');
