@@ -499,10 +499,6 @@ async function handleSapoPrintEvent(request, env) {
 
 async function handleOriginalPrintRequest(request, env) {
   if (request.method !== 'POST') return json({ ok: false, error: 'Method not allowed.' }, 405);
-  const expectedPin = String(env.PRINT_WEB_PIN || '');
-  const suppliedPin = String(request.headers.get('X-Print-Pin') || '');
-  if (!expectedPin) return json({ ok: false, error: 'Chưa cấu hình Secret PRINT_WEB_PIN trên Cloudflare.' }, 503);
-  if (!constantTimeEqual(suppliedPin, expectedPin)) return json({ ok: false, error: 'Mã PIN in không đúng.' }, 401);
   let body;
   try { body = await request.json(); } catch { return json({ ok: false, error: 'Dữ liệu yêu cầu không hợp lệ.' }, 400); }
   const orderId = String(body?.order?.id || body?.orderId || '').trim();
@@ -518,10 +514,6 @@ async function handleOriginalPrintRequest(request, env) {
 
 async function handlePrintRequest(request, env) {
   if (request.method !== 'POST') return json({ ok: false, error: 'Method not allowed.' }, 405);
-  const expectedPin = String(env.PRINT_WEB_PIN || '');
-  const suppliedPin = String(request.headers.get('X-Print-Pin') || '');
-  if (!expectedPin) return json({ ok: false, error: 'Chưa cấu hình Secret PRINT_WEB_PIN trên Cloudflare.' }, 503);
-  if (!constantTimeEqual(suppliedPin, expectedPin)) return json({ ok: false, error: 'Mã PIN in không đúng.' }, 401);
   const bodyText = await request.text();
   if (bodyText.length > 30000) return json({ ok: false, error: 'Dữ liệu bill quá lớn.' }, 413);
   let payload;
