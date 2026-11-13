@@ -44,14 +44,14 @@ test('Print Broker chuyển lệnh trực tiếp và nhận phản hồi Agent',
   assert.equal(result.printerName, 'Xprinter');
 });
 
-test('API in từ chối mã PIN sai', async () => {
+test('API in không còn chặn bằng PIN', async () => {
   const response = await worker.fetch(request('/api/print', {
     method: 'POST',
-    headers: { 'content-type': 'application/json', 'X-Print-Pin': 'wrong' },
+    headers: { 'content-type': 'application/json' },
     body: JSON.stringify({ order: { code: 'TEST-3', items: [] } })
-  }), { PRINT_WEB_PIN: 'correct-pin' });
-  assert.equal(response.status, 401);
-  assert.match((await response.json()).error, /PIN/i);
+  }), {});
+  assert.equal(response.status, 503);
+  assert.match((await response.json()).error, /Print Broker/i);
 });
 
 
@@ -74,13 +74,24 @@ test('Sapo Print Bridge từ chối bridge token sai', async () => {
   assert.equal(response.status, 401);
 });
 
-test('API in vận đơn gốc vẫn yêu cầu PIN', async () => {
+test('API chuẩn bị PDF gốc hoạt động và yêu cầu Print Broker', async () => {
+  const response = await worker.fetch(request('/api/print-original/prepare', {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ order: { id: '1061994503', code: '261112581WM3V8' } })
+  }), {});
+  assert.equal(response.status, 503);
+  assert.match((await response.json()).error, /Print Broker/i);
+});
+
+test('API in vận đơn gốc không còn chặn bằng PIN', async () => {
   const response = await worker.fetch(request('/api/print-original', {
     method: 'POST',
-    headers: { 'content-type': 'application/json', 'X-Print-Pin': 'wrong' },
+    headers: { 'content-type': 'application/json' },
     body: JSON.stringify({ order: { id: '1061994503', code: '261112581WM3V8' } })
-  }), { PRINT_WEB_PIN: 'correct-pin' });
-  assert.equal(response.status, 401);
+  }), {});
+  assert.equal(response.status, 503);
+  assert.match((await response.json()).error, /Print Broker/i);
 });
 
 
