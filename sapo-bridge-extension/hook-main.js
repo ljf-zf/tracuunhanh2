@@ -23,9 +23,12 @@
   function captureUrl(url) {
     try {
       const u = new URL(String(url), location.href);
-      if (u.pathname === '/v2/orders/print') {
-        lastClientId = u.searchParams.get('clientId') || lastClientId;
-        lastAccountId = u.searchParams.get('accountId') || lastAccountId;
+      // Sapo may expose these identifiers on other API requests before the first print.
+      const clientCandidate = u.searchParams.get('clientId') || u.searchParams.get('client_id') || '';
+      const accountCandidate = u.searchParams.get('accountId') || u.searchParams.get('account_id') || '';
+      if (clientCandidate) lastClientId = clientCandidate;
+      if (accountCandidate) lastAccountId = accountCandidate;
+      if (lastClientId || lastAccountId) {
         window.postMessage({ source: MARK, context: { clientId: lastClientId, accountId: lastAccountId } }, location.origin);
       }
     } catch (_) {}
@@ -106,6 +109,7 @@
   window.fetch = async function(...args) {
     const url = typeof args[0] === 'string' ? args[0] : args[0]?.url || '';
     captureUrl(url);
+    captureHeaders(args[0]?.headers);
     captureHeaders(args[1]?.headers);
     const response = await originalFetch.apply(this, args);
     try { if (/notification\/\?EIO=4/.test(url)) response.clone().text().then(publish).catch(() => {}); } catch (_) {}

@@ -37,6 +37,17 @@ async function connectBridge() {
         const saved = await chrome.storage.local.get(['sapoTabId', 'sapoFrameId']);
         let targetTabId = Number(saved.sapoTabId) || 0;
         let targetFrameId = Number(saved.sapoFrameId) || 0;
+        // Stored tab/frame IDs can become stale after Edge restores or closes a tab.
+        if (targetTabId) {
+          const tab = await chrome.tabs.get(targetTabId).catch(() => null);
+          if (!tab || !/market-place\.sapoapps\.vn|mysapogo\.com/i.test(tab.url || '')) {
+            targetTabId = 0;
+            targetFrameId = 0;
+          } else {
+            const frames = await chrome.webNavigation.getAllFrames({ tabId: targetTabId }).catch(() => []);
+            if (targetFrameId && !frames.some(frame => frame.frameId === targetFrameId)) targetFrameId = 0;
+          }
+        }
         if (!targetTabId) {
           const tabs = await chrome.tabs.query({ url: ['https://market-place.sapoapps.vn/*', 'https://*.mysapogo.com/*'] });
           const tab = tabs.find(item => item.active) || tabs[0];
@@ -47,12 +58,12 @@ async function connectBridge() {
           }
         }
         if (!targetTabId) {
-          socket.send(JSON.stringify({ type: 'bridge-trigger-error', requestId: message.requestId, error: 'Không tìm thấy tab Sapo đang mở trên Edge.' }));
+          socket.send(JSON.stringify({ type: 'bridge-trigger-error', requestId: message.requestId, error: 'Không tìm thấy tab Sapo đang mở trên Edge. Hãy mở và đăng nhập Sapo.' }));
           return;
         }
         chrome.tabs.sendMessage(targetTabId, { type: 'TRIGGER_SAPO_PRINT', command: message }, { frameId: targetFrameId }, response => {
           if (chrome.runtime.lastError || response?.ok === false) {
-            socket.send(JSON.stringify({ type: 'bridge-trigger-error', requestId: message.requestId, error: response?.error || 'Không gửi được lệnh tới tab Sapo.' }));
+            socket.send(JSON.stringify({ type: 'bridge-trigger-error', requestId: message.requestId, error: response?.error || chrome.runtime.lastError?.message || 'Không gửi được lệnh tới tab Sapo.' }));
           }
         });
       }
