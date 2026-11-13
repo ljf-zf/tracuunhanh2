@@ -89,6 +89,29 @@ async function printOrder(orderKey, button) {
 }
 
 
+const originalPreparePromises = new Map();
+
+function prepareOriginalOrder(orderKey) {
+  const key = String(orderKey);
+  if (originalPreparePromises.has(key)) return originalPreparePromises.get(key);
+  const order = currentOrders.get(key);
+  if (!order) return Promise.resolve(false);
+  const promise = fetch('/api/print-original/prepare', {
+    method: 'POST', credentials: 'same-origin',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ order: { id: order.id, code: order.code } })
+  }).then(async response => {
+    const data = await response.json().catch(() => ({}));
+    if (!response.ok || !data.ok || !data.prepared) throw new Error(data.error || 'Chưa chuẩn bị được PDF.');
+    return true;
+  }).catch(() => {
+    originalPreparePromises.delete(key);
+    return false;
+  });
+  originalPreparePromises.set(key, promise);
+  return promise;
+}
+
 async function printOriginalOrder(orderKey, button) {
   const order = currentOrders.get(String(orderKey));
   if (!order) { setStatus('Không tìm thấy đơn hàng. Hãy tra cứu lại.', 'error'); return; }
@@ -97,6 +120,8 @@ async function printOriginalOrder(orderKey, button) {
   button.textContent = 'Đang lấy PDF Sapo…';
   setStatus(`Đang tìm PDF vận đơn gốc của ${order.code}…`);
   try {
+    const preparing = originalPreparePromises.get(String(orderKey));
+    if (preparing) await preparing;
     const response = await fetch('/api/print-original', {
       method: 'POST', credentials: 'same-origin',
       headers: { 'content-type': 'application/json' },
@@ -156,6 +181,15 @@ $('clear').addEventListener('click', () => {
   $('last4').focus();
   resultsSection.classList.add('hidden');
   setStatus('');
+});
+$('results').addEventListener('pointerover', event => {
+  const button = event.target.closest('[data-print-original]');
+  if (!button || button.contains(event.relatedTarget)) return;
+  prepareOriginalOrder(button.dataset.printOriginal);
+});
+$('results').addEventListener('pointerdown', event => {
+  const button = event.target.closest('[data-print-original]');
+  if (button) prepareOriginalOrder(button.dataset.printOriginal);
 });
 $('results').addEventListener('click', event => {
   const originalButton = event.target.closest('[data-print-original]');
