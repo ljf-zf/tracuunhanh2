@@ -5,7 +5,6 @@ const statusEl = $('status');
 let searchTimer = null;
 let activeController = null;
 let lastQuery = '';
-let printPin = '';
 const currentOrders = new Map();
 
 function setStatus(text = '', kind = '') {
@@ -66,10 +65,6 @@ async function updatePrinterStatus() {
 async function printOrder(orderKey, button) {
   const order = currentOrders.get(String(orderKey));
   if (!order) { setStatus('Không tìm thấy dữ liệu đơn để in. Hãy tra cứu lại.', 'error'); return; }
-  if (!printPin) {
-    printPin = String(window.prompt('Nhập mã PIN in do quản trị viên cung cấp:') || '').trim();
-    if (!printPin) return;
-  }
   button.disabled = true;
   const originalText = button.textContent;
   button.textContent = 'Đang gửi lệnh…';
@@ -78,11 +73,10 @@ async function printOrder(orderKey, button) {
     const response = await fetch('/api/print', {
       method: 'POST',
       credentials: 'same-origin',
-      headers: { 'content-type': 'application/json', 'X-Print-Pin': printPin },
+      headers: { 'content-type': 'application/json' },
       body: JSON.stringify({ order })
     });
     const data = await response.json().catch(() => ({}));
-    if (response.status === 401) printPin = '';
     if (!response.ok || !data.ok) throw new Error(data.error || data.message || `Không in được (${response.status}).`);
     setStatus(`Đã gửi lệnh in ${order.code} đến ${data.printerName || 'máy in'}. ${data.message || ''}`, 'success');
     button.textContent = 'Đã gửi in';
@@ -98,10 +92,6 @@ async function printOrder(orderKey, button) {
 async function printOriginalOrder(orderKey, button) {
   const order = currentOrders.get(String(orderKey));
   if (!order) { setStatus('Không tìm thấy đơn hàng. Hãy tra cứu lại.', 'error'); return; }
-  if (!printPin) {
-    printPin = String(window.prompt('Nhập mã PIN in do quản trị viên cung cấp:') || '').trim();
-    if (!printPin) return;
-  }
   button.disabled = true;
   const originalText = button.textContent;
   button.textContent = 'Đang lấy PDF Sapo…';
@@ -109,11 +99,10 @@ async function printOriginalOrder(orderKey, button) {
   try {
     const response = await fetch('/api/print-original', {
       method: 'POST', credentials: 'same-origin',
-      headers: { 'content-type': 'application/json', 'X-Print-Pin': printPin },
+      headers: { 'content-type': 'application/json' },
       body: JSON.stringify({ order: { id: order.id, code: order.code } })
     });
     const data = await response.json().catch(() => ({}));
-    if (response.status === 401) printPin = '';
     if (!response.ok || !data.ok) throw new Error(data.error || `Không in được vận đơn (${response.status}).`);
     setStatus(`Đã gửi vận đơn Sapo của ${order.code} đến ${data.printerName || 'máy in'}. ${data.message || ''}`, 'success');
     button.textContent = 'Đã gửi vận đơn';
