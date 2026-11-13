@@ -710,8 +710,27 @@ export class PrintBroker {
     const agent = sockets.find(item => (item.deserializeAttachment() || {}).role !== 'bridge');
     if (!agent) return { ok: false, error: 'Print Agent đã ngắt kết nối.' };
     let response;
-    try { response = await fetch(record.pdfUrl, { headers: { Accept: 'application/pdf' }, redirect: 'error' }); }
-    catch (_) { return { ok: false, error: 'Không tải được PDF gốc từ máy chủ Sapo.' }; }
+    try {
+      // CDN vận đơn có thể chuyển hướng sang URL lưu trữ PDF khác cùng hệ thống.
+      // Cho phép theo redirect nhưng chỉ chấp nhận đích HTTPS thuộc dktcdn.net.
+      response = await fetch(record.pdfUrl, {
+        headers: { Accept: 'application/pdf' },
+        redirect: 'follow'
+      });
+    } catch (error) {
+      const detail = String(error?.message || error || 'fetch failed').slice(0, 180);
+      console.warn('[PrintBroker] PDF fetch failed:', detail);
+      return { ok: false, error: `Không tải được PDF từ CDN Sapo: ${detail}` };
+    }
+    try {
+      const finalUrl = new URL(response.url || record.pdfUrl);
+      if (finalUrl.protocol !== 'https:' ||
+          !(finalUrl.hostname === 'dktcdn.net' || finalUrl.hostname.endsWith('.dktcdn.net'))) {
+        return { ok: false, error: 'CDN Sapo chuyển hướng tới máy chủ ngoài danh sách an toàn.' };
+      }
+    } catch (_) {
+      return { ok: false, error: 'URL PDF sau chuyển hướng không hợp lệ.' };
+    }
     if (!response.ok) return { ok: false, error: `Máy chủ PDF trả về HTTP ${response.status}.` };
     const bytes = await response.arrayBuffer();
     if (bytes.byteLength < 8 || bytes.byteLength > 12 * 1024 * 1024) return { ok: false, error: 'PDF không hợp lệ hoặc vượt giới hạn 12 MB.' };
