@@ -497,6 +497,21 @@ async function handleSapoPrintEvent(request, env) {
   return result;
 }
 
+async function handleOriginalPrepareRequest(request, env) {
+  if (request.method !== 'POST') return json({ ok: false, error: 'Method not allowed.' }, 405);
+  let body;
+  try { body = await request.json(); } catch { return json({ ok: false, error: 'Dữ liệu yêu cầu không hợp lệ.' }, 400); }
+  const orderId = String(body?.order?.id || body?.orderId || '').trim();
+  const orderCode = String(body?.order?.code || body?.orderCode || '').trim();
+  if (!orderId && !orderCode) return json({ ok: false, error: 'Thiếu mã đơn hoặc ID đơn hàng.' }, 400);
+  if (!env.PRINT_BROKER) return json({ ok: false, error: 'Print Broker chưa được cấu hình.' }, 503);
+  const id = env.PRINT_BROKER.idFromName('store-printer');
+  return env.PRINT_BROKER.get(id).fetch('https://print-broker/prepare-original', {
+    method: 'POST', headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ orderId, orderCode })
+  });
+}
+
 async function handleOriginalPrintRequest(request, env) {
   if (request.method !== 'POST') return json({ ok: false, error: 'Method not allowed.' }, 405);
   let body;
@@ -545,6 +560,7 @@ export class PrintBroker {
     this.env = env;
     this.pending = new Map();
     this.pendingOriginal = new Map();
+    this.pendingPrepare = new Map();
     this.busy = false;
   }
 
@@ -605,10 +621,16 @@ export class PrintBroker {
         await this.state.storage.put(`sapo-print-id:${safe.orderId}`, safe, { expirationTtl: 60 * 60 * 12 });
         if (safe.orderCode) await this.state.storage.put(`sapo-print-code:${safe.orderCode}`, safe, { expirationTtl: 60 * 60 * 12 });
         saved++;
-        const waiting = [...this.pendingOriginal.values()].find(item =>
+        const matchesOrder = item =>
           (item.orderId && item.orderId === safe.orderId) ||
-          (item.orderCode && safe.orderCode && item.orderCode === safe.orderCode)
-        );
+          (item.orderCode && safe.orderCode && item.orderCode === safe.orderCode);
+        const preparing = [...this.pendingPrepare.values()].filter(matchesOrder);
+        for (const waitingPrepare of preparing) {
+          clearTimeout(waitingPrepare.timer);
+          this.pendingPrepare.delete(waitingPrepare.requestId);
+          waitingPrepare.resolve({ ok: true, prepared: true, cached: false, message: 'PDF vận đơn đã sẵn sàng.' });
+        }
+        const waiting = [...this.pendingOriginal.values()].find(matchesOrder);
         if (waiting) {
           clearTimeout(waiting.timer);
           this.pendingOriginal.delete(waiting.requestId);
@@ -618,6 +640,35 @@ export class PrintBroker {
         }
       }
       return json({ ok: true, saved, dispatched });
+    }
+
+    if (url.pathname.endsWith('/prepare-original') && request.method === 'POST') {
+      const sockets = this.state.getWebSockets();
+      const bridge = sockets.find(socket => (socket.deserializeAttachment() || {}).role === 'bridge');
+      const agent = sockets.find(socket => (socket.deserializeAttachment() || {}).role !== 'bridge');
+      if (!agent) return json({ ok: false, error: 'Máy tính in chưa kết nối. Hãy bật Windows và Print Agent.' }, 503);
+      if (!bridge) return json({ ok: false, error: 'Sapo Print Bridge chưa kết nối. Hãy mở Edge, đăng nhập Sapo và bật extension.' }, 503);
+      let body;
+      try { body = await request.json(); } catch { return json({ ok: false, error: 'Dữ liệu yêu cầu không hợp lệ.' }, 400); }
+      const orderId = String(body.orderId || '');
+      const orderCode = String(body.orderCode || '');
+      let record = orderId ? await this.state.storage.get(`sapo-print-id:${orderId}`) : null;
+      if (!record && orderCode) record = await this.state.storage.get(`sapo-print-code:${orderCode}`);
+      if (record && validSapoPdfUrl(record.pdfUrl)) return json({ ok: true, prepared: true, cached: true, message: 'PDF đã có sẵn.' });
+      const requestId = crypto.randomUUID();
+      const result = await new Promise(resolve => {
+        const timer = setTimeout(() => {
+          this.pendingPrepare.delete(requestId);
+          resolve({ ok: false, prepared: false, error: 'Sapo chưa tạo PDF kịp thời. Có thể tiếp tục bấm in để thử lại.' });
+        }, 20000);
+        this.pendingPrepare.set(requestId, { requestId, orderId, orderCode, resolve, timer });
+        try { bridge.send(JSON.stringify({ type: 'trigger-sapo-print', requestId, orderId, orderCode })); }
+        catch (_) {
+          clearTimeout(timer); this.pendingPrepare.delete(requestId);
+          resolve({ ok: false, prepared: false, error: 'Không gửi được yêu cầu chuẩn bị PDF tới Sapo Print Bridge.' });
+        }
+      });
+      return json(result, result.ok ? 200 : 502);
     }
 
     if (url.pathname.endsWith('/request-original') && request.method === 'POST') {
@@ -757,10 +808,17 @@ export class PrintBroker {
       return;
     }
     if (data.type === 'bridge-trigger-error' && data.requestId) {
-      const entry = this.pendingOriginal.get(String(data.requestId));
+      const requestId = String(data.requestId);
+      const error = String(data.error || 'Không thể kích hoạt thao tác in trong Sapo.');
+      const entry = this.pendingOriginal.get(requestId);
       if (entry) {
-        clearTimeout(entry.timer); this.pendingOriginal.delete(String(data.requestId));
-        entry.resolve({ ok: false, error: String(data.error || 'Không thể kích hoạt thao tác in trong Sapo.') });
+        clearTimeout(entry.timer); this.pendingOriginal.delete(requestId);
+        entry.resolve({ ok: false, error });
+      }
+      const preparing = this.pendingPrepare.get(requestId);
+      if (preparing) {
+        clearTimeout(preparing.timer); this.pendingPrepare.delete(requestId);
+        preparing.resolve({ ok: false, prepared: false, error });
       }
       return;
     }
@@ -795,6 +853,7 @@ export default {
     }
     if (request.method === 'GET' && url.pathname === '/api/print/status') return printAgentStatus(env);
     if (url.pathname === '/api/print') return handlePrintRequest(request, env);
+    if (url.pathname === '/api/print-original/prepare') return handleOriginalPrepareRequest(request, env);
     if (url.pathname === '/api/print-original') return handleOriginalPrintRequest(request, env);
     if (url.pathname === '/api/sapo/print-event') return handleSapoPrintEvent(request, env);
     if (url.pathname === '/api/sync-sapo-auth') {
