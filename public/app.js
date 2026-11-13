@@ -45,6 +45,9 @@ function renderOrders(data) {
       <div class="order-actions"><button type="button" class="print-button" data-print-order="${escapeHtml(key)}">▣ In bill</button><button type="button" class="print-original-button" data-print-original="${escapeHtml(key)}">▤ In vận đơn Sapo</button></div>
     </article>`;
   }).join('');
+  // Bắt đầu lấy trước PDF của toàn bộ đơn ngay khi kết quả vừa render.
+  // Giới hạn 2 yêu cầu đồng thời để tránh dồn lệnh vào Sapo.
+  for (const order of data.orders) prepareOriginalOrder(String(order.id || order.code));
 }
 
 async function updatePrinterStatus() {
@@ -90,25 +93,45 @@ async function printOrder(orderKey, button) {
 
 
 const originalPreparePromises = new Map();
+const originalPrepareQueue = [];
+let activeOriginalPreparations = 0;
+const MAX_PARALLEL_ORIGINAL_PREPARES = 2;
+
+function pumpOriginalPrepareQueue() {
+  while (activeOriginalPreparations < MAX_PARALLEL_ORIGINAL_PREPARES && originalPrepareQueue.length) {
+    const task = originalPrepareQueue.shift();
+    activeOriginalPreparations++;
+    (async () => {
+      try {
+        const response = await fetch('/api/print-original/prepare', {
+          method: 'POST', credentials: 'same-origin',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({ order: { id: task.order.id, code: task.order.code } })
+        });
+        const data = await response.json().catch(() => ({}));
+        if (!response.ok || !data.ok || !data.prepared) throw new Error(data.error || 'Chưa chuẩn bị được PDF.');
+        task.resolve(true);
+      } catch (_) {
+        if (originalPreparePromises.get(task.key) === task.promise) originalPreparePromises.delete(task.key);
+        task.resolve(false);
+      } finally {
+        activeOriginalPreparations--;
+        pumpOriginalPrepareQueue();
+      }
+    })();
+  }
+}
 
 function prepareOriginalOrder(orderKey) {
   const key = String(orderKey);
   if (originalPreparePromises.has(key)) return originalPreparePromises.get(key);
   const order = currentOrders.get(key);
   if (!order) return Promise.resolve(false);
-  const promise = fetch('/api/print-original/prepare', {
-    method: 'POST', credentials: 'same-origin',
-    headers: { 'content-type': 'application/json' },
-    body: JSON.stringify({ order: { id: order.id, code: order.code } })
-  }).then(async response => {
-    const data = await response.json().catch(() => ({}));
-    if (!response.ok || !data.ok || !data.prepared) throw new Error(data.error || 'Chưa chuẩn bị được PDF.');
-    return true;
-  }).catch(() => {
-    originalPreparePromises.delete(key);
-    return false;
-  });
+  let resolveTask;
+  const promise = new Promise(resolve => { resolveTask = resolve; });
   originalPreparePromises.set(key, promise);
+  originalPrepareQueue.push({ key, order, promise, resolve: resolveTask });
+  pumpOriginalPrepareQueue();
   return promise;
 }
 
