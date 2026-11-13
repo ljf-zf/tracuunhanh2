@@ -66,7 +66,9 @@ async function updatePrinterStatus() {
 async function printOrder(orderKey, button) {
   const order = currentOrders.get(String(orderKey));
   if (!order) { setStatus('Không tìm thấy dữ liệu đơn để in. Hãy tra cứu lại.', 'error'); return; }
- 
+  if (!printPin) {
+    printPin = String(window.prompt('Nhập mã PIN in do quản trị viên cung cấp:') || '').trim();
+    if (!printPin) return;
   }
   button.disabled = true;
   const originalText = button.textContent;
